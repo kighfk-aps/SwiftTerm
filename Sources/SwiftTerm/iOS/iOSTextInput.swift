@@ -360,12 +360,39 @@ extension TerminalView: UITextInput {
         return result
     }
             
-    public func firstRect(for range: UITextRange) -> CGRect {
-        return bounds
+    /// Display width used to map a storage offset to a terminal column.
+    /// Hangul syllables and jamo occupy two cells; assume single width for
+    /// everything else (good enough for anchoring the IME).
+    private func textInputDisplayWidth(_ text: Substring) -> Int {
+        text.reduce(0) { $0 + (Hangul.isComposingUnit($1) ? 2 : 1) }
     }
-    
+
+    /// The rect for a storage position on the terminal. The terminal cursor
+    /// sits just after the echoed input line, so the column is the cursor
+    /// column minus the display width of whatever follows `position`.
+    ///
+    /// Returning `bounds` (the previous behavior) gives the IME a meaningless
+    /// anchor; input methods then fall back to raw jamo-level inserts instead
+    /// of inline composition for hardware keyboards.
+    public func firstRect(for range: UITextRange) -> CGRect {
+        guard let r = coerceTextRange(range) else { return bounds }
+        var rect = caretRect(for: TextPosition(offset: r.startPosition.offset))
+        let width = textInputDisplayWidth(textInputStorage[r.fullRange(in: textInputStorage)])
+        rect.size.width = CGFloat(width) * cellDimension.width
+        return rect
+    }
+
     public func caretRect(for position: UITextPosition) -> CGRect {
-        return bounds
+        guard let tp = coerceTextPosition(position) else { return bounds }
+        let cursor = getTerminal().getCursorLocation()
+        let offset = min(tp.offset, textInputStorage.count)
+        let tail = textInputStorage.dropFirst(offset)
+        let tailWidth = textInputDisplayWidth(tail)
+        let col = max(0, cursor.x - tailWidth)
+        let origin = CGPoint(
+            x: CGFloat(col) * cellDimension.width,
+            y: CGFloat(cursor.y) * cellDimension.height)
+        return CGRect(origin: origin, size: cellDimension)
     }
     
     public func selectionRects(for range: UITextRange) -> [UITextSelectionRect] {
