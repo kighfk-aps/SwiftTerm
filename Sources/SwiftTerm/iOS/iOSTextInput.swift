@@ -364,7 +364,14 @@ extension TerminalView: UITextInput {
     /// Hangul syllables and jamo occupy two cells; assume single width for
     /// everything else (good enough for anchoring the IME).
     private func textInputDisplayWidth(_ text: Substring) -> Int {
-        text.reduce(0) { $0 + (Hangul.isComposingUnit($1) ? 2 : 1) }
+        text.reduce(0) { total, ch in
+            guard let scalar = ch.unicodeScalars.first, ch.unicodeScalars.count == 1 else { return total + 1 }
+            let v = scalar.value
+            let wide = (0xAC00...0xD7A3).contains(v)
+                || (0x3131...0x318E).contains(v)
+                || (0x1100...0x11FF).contains(v)
+            return total + (wide ? 2 : 1)
+        }
     }
 
     /// The rect for a storage position on the terminal. The terminal cursor
