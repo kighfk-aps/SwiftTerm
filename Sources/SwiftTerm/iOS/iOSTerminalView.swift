@@ -1942,6 +1942,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
 
         let rangeStartIndex = rangeToReplace.startPosition.offset
+        // Range-replacing inserts (IME selection edits, e.g. the Korean keyboard
+        // replacing a selected span after a language toggle) must erase the text
+        // they replace on the terminal, mirroring what `replace(_:)` does.
+        // Marked text is uncommitted composition that was never echoed, so it
+        // must not produce backspaces.
+        var replacedCharCount = 0
+        if _markedTextRange == nil, !rangeToReplace.isEmpty {
+            replacedCharCount = textInputStorage[rangeToReplace.fullRange(in: textInputStorage)].count
+        }
         textInputStorage.replaceSubrange(rangeToReplace.fullRange(in: textInputStorage), with: textToInsert)
         _markedTextRange = nil
         let insertedOffset = textInputStorage.textInputValidUTF16Offset(
@@ -1951,6 +1960,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         _selectedTextRange = TextRange(from: insertedPosition, to: insertedPosition)
 
         endTextInputEdit()
+
+        if replacedCharCount > 0 {
+            uitiLog("commitTextInput range-replace backspaces:\(replacedCharCount)")
+            for _ in 0..<replacedCharCount {
+                sendBackspaceKey()
+            }
+        }
 
         if !terminal.keyboardEnhancementFlags.isEmpty {
             sendKittyTextInput(textToInsert, applyModifiers: applyModifiers)
