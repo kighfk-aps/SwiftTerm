@@ -1919,16 +1919,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             pendingAutoPeriodDeleteWasSpace = false
         }
 
-        switch processPendingKoreanResyllabification(text) {
-        case .completed:
-            return
-        case .prefixReinserted:
-            break
-        case .none:
-            if tryResyllabifyKoreanFinalBeforeVowel(text) || tryComposeKoreanFinal(text) {
-                return
-            }
-        }
+        // The Korean composition heuristics (compose-final, resyllabify, and the
+        // delete/reinsert transaction) were built for the delivery model of
+        // SwiftTerm issue #563, where the keyboard committed syllable states
+        // without corrections. Current iPadOS delivers the first jamo of a new
+        // syllable as a bare insertText and then corrects itself with
+        // select + deleteBackward + insertText spans. Composing the bare jamo
+        // into the previous syllable desynced the storage character count from
+        // the IME's document model, corrupting every subsequent range the IME
+        // selected (observed on-device, 2026-08). With storage mirroring the
+        // IME exactly, the corrections land precisely on their own.
+        resetKoreanResyllabificationTransaction()
 
         beginTextInputEdit()
 
@@ -2563,7 +2564,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             // Send as many backspaces that are in the range to delete. When on auto-repeat, after a some time
             // pressing the backspace, it will delete chunks of text at a time.
             let oldText = textInputStorage[rangeToDelete.fullRange(in: textInputStorage)]
-            trackKoreanResyllabificationDeletion(oldText, range: rangeToDelete)
+            resetKoreanResyllabificationTransaction()
             let backspaces = oldText.count
             for _ in 0..<backspaces {
                 self.sendBackspaceKey()
