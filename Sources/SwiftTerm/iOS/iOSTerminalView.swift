@@ -268,6 +268,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // be removed afterwards by the input system (input methods will insert approximiations, mark and change on demand)
     var _markedTextRange: TextRange?
 
+    /// Marked text itself is never echoed; these are characters the IME
+    /// composed over that had already been sent, so they alone owe
+    /// backspaces when the marked span goes away.
+    var echoedCharsUnderMark = 0
+
     // The input delegate is part of UITextInput, and we notify it of changes.
     public weak var inputDelegate: UITextInputDelegate?
 
@@ -1952,6 +1957,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if _markedTextRange == nil, !rangeToReplace.isEmpty {
             replacedCharCount = textInputStorage[rangeToReplace.fullRange(in: textInputStorage)].count
         }
+        // A mark composed over previously echoed characters owes those
+        // backspaces on commit; a fresh mark owes nothing.
+        let echoBackspaces = _markedTextRange == nil ? 0 : echoedCharsUnderMark
+        echoedCharsUnderMark = 0
         textInputStorage.replaceSubrange(rangeToReplace.fullRange(in: textInputStorage), with: textToInsert)
         _markedTextRange = nil
         let insertedOffset = textInputStorage.textInputValidUTF16Offset(
@@ -1965,6 +1974,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if replacedCharCount > 0 {
             uitiLog("commitTextInput range-replace backspaces:\(replacedCharCount)")
             for _ in 0..<replacedCharCount {
+                sendBackspaceKey()
+            }
+        }
+
+        if echoBackspaces > 0 {
+            uitiLog("commitTextInput mark-overlay backspaces:\(echoBackspaces)")
+            for _ in 0..<echoBackspaces {
                 sendBackspaceKey()
             }
         }
@@ -2565,7 +2581,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             // pressing the backspace, it will delete chunks of text at a time.
             let oldText = textInputStorage[rangeToDelete.fullRange(in: textInputStorage)]
             resetKoreanResyllabificationTransaction()
-            let backspaces = oldText.count
+            // Deleting marked text owes backspaces only for characters that
+            // were echoed before the IME composed over them.
+            let backspaces = min(echoedCharsUnderMark, oldText.count)
+            echoedCharsUnderMark = 0
             for _ in 0..<backspaces {
                 self.sendBackspaceKey()
             }

@@ -256,6 +256,11 @@ extension TerminalView: UITextInput {
         beginTextInputEdit()
 
         if let newText = markedText {
+            if _markedTextRange == nil {
+                // Composing over an existing selection: those characters were
+                // already echoed and are owed backspaces when this mark goes away.
+                echoedCharsUnderMark = textInputStorage[rangeToReplace.fullRange(in: textInputStorage)].count
+            }
             textInputStorage.replaceSubrange(rangeToReplace.fullRange(in: textInputStorage), with: newText)
             // Figure out the new selection range
             let rangeStartIndex = rangeStartPosition.offset
@@ -272,6 +277,7 @@ extension TerminalView: UITextInput {
             _selectedTextRange = TextRange(from: TextPosition(offset: selectionStartIndex), 
                                            to: TextPosition(offset: selectionEndIndex))
         } else {
+            echoedCharsUnderMark = 0
             textInputStorage.removeSubrange(rangeToReplace.fullRange(in: textInputStorage))
             _markedTextRange = nil
             _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
@@ -286,6 +292,7 @@ extension TerminalView: UITextInput {
         beginTextInputEdit()
         pendingAutoPeriodDeleteWasSpace = false
         resetKoreanResyllabificationTransaction()
+        echoedCharsUnderMark = 0
         textInputStorage = ""
         _selectedTextRange = TextRange (from: TextPosition(offset: 0), to: TextPosition(offset: 0))
         _markedTextRange = nil
