@@ -125,8 +125,10 @@ enum HangulComposition {
     ///   (가+ㄱ → 각); a compatible consonant extends an existing single final
     ///   into a double final (돌+ㄱ → 돐). Incompatible consonants start a new
     ///   syllable and pass through.
-    /// - A vowel after a syllable carrying a final resyllabifies: the final
-    ///   moves down to lead the next syllable (간+ㅏ → 가나, 닭+ㅏ → 다가).
+    /// - A vowel after a syllable carrying a final resyllabifies: for a single
+    ///   final the whole consonant moves down (간+ㅏ → 가나); for a double
+    ///   final only the second component moves, the first stays as the final
+    ///   of the first syllable (닭+ㅏ → 달가).
     static func replacement(for base: Character, incoming: Character) -> String? {
         guard let syl = decompose(base) else { return nil }
 
