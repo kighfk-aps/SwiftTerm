@@ -1,0 +1,166 @@
+//
+//  iOSHangulComposition.swift
+//  SwiftTerm
+//
+//  Narrow local Hangul composition for the hardware-keyboard input path.
+//
+
+#if os(iOS) || os(visionOS)
+import Foundation
+
+/// Pure Hangul syllable arithmetic backing the local composition fallback.
+///
+/// On-device traces (2026-08-22) show that iPadOS Korean hardware keyboards
+/// deliver the leading jamo of every new syllable as a bare `insertText` and
+/// then repair 초성+중성 themselves with select/deleteBackward/insertText
+/// spans — but they never issue any correction for 받침 jamo delivered after a
+/// completed syllable. Those jamo used to reach the PTY verbatim ("가ㄱ"
+/// instead of "각"). Removing this composer therefore reintroduces that bug;
+/// extend it instead when iPadOS changes its delivery model.
+enum HangulComposition {
+    static let choseongOrder: [Character] = [
+        "ㄱ", "ㄲ", "ㄴ", "ㄷ", "ㄸ", "ㄹ", "ㅁ", "ㅂ", "ㅃ", "ㅅ",
+        "ㅆ", "ㅇ", "ㅈ", "ㅉ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ",
+    ]
+
+    static let jungseongOrder: [Character] = [
+        "ㅏ", "ㅐ", "ㅑ", "ㅒ", "ㅓ", "ㅔ", "ㅕ", "ㅖ", "ㅗ", "ㅘ", "ㅙ",
+        "ㅚ", "ㅛ", "ㅜ", "ㅝ", "ㅞ", "ㅟ", "ㅠ", "ㅡ", "ㅢ", "ㅣ",
+    ]
+
+    /// Index 0 means "no final consonant".
+    static let jongseongOrder: [Character?] = [
+        nil, "ㄱ", "ㄲ", "ㄳ", "ㄴ", "ㄵ", "ㄶ", "ㄷ", "ㄹ", "ㄺ", "ㄻ",
+        "ㄼ", "ㄽ", "ㄾ", "ㄿ", "ㅀ", "ㅁ", "ㅂ", "ㅄ", "ㅅ", "ㅆ", "ㅇ",
+        "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ",
+    ]
+
+    private static let baseValue = 0xAC00
+    private static let medialCount = jungseongOrder.count
+    private static let finalCount = jongseongOrder.count
+
+    struct Syllable {
+        let initial: Int
+        let medial: Int
+        let final: Int
+
+        var finalCharacter: Character? { jongseongOrder[final] }
+    }
+
+    static func decompose(_ character: Character) -> Syllable? {
+        guard let scalar = character.unicodeScalars.first,
+              character.unicodeScalars.count == 1 else { return nil }
+        let value = Int(scalar.value) - baseValue
+        guard value >= 0, value < choseongOrder.count * medialCount * finalCount else { return nil }
+        return Syllable(
+            initial: value / (medialCount * finalCount),
+            medial: (value % (medialCount * finalCount)) / finalCount,
+            final: value % finalCount)
+    }
+
+    static func compose(initial: Int, medial: Int, final: Int) -> Character {
+        precondition(initial >= 0 && initial < choseongOrder.count,
+                     "leading consonant index out of range")
+        precondition(medial >= 0 && medial < medialCount,
+                     "vowel index out of range")
+        precondition(final >= 0 && final < finalCount,
+                     "final consonant index out of range")
+        let scalarValue = baseValue + initial * medialCount * finalCount + medial * finalCount + final
+        guard let scalar = Unicode.Scalar(scalarValue) else {
+            preconditionFailure("unreachable: indices validated above")
+        }
+        return Character(scalar)
+    }
+
+    static func isVowelJamo(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first,
+              character.unicodeScalars.count == 1 else { return false }
+        return (0x314F...0x3163).contains(scalar.value)
+    }
+
+    static func jongseongIndex(of character: Character) -> Int? {
+        jongseongOrder.firstIndex(where: { $0 == character })
+    }
+
+    static func doubleFinal(first: Character, second: Character) -> Character? {
+        switch (first, second) {
+        case ("ㄱ", "ㅅ"): return "ㄳ"
+        case ("ㄴ", "ㅈ"): return "ㄵ"
+        case ("ㄴ", "ㅎ"): return "ㄶ"
+        case ("ㄹ", "ㄱ"): return "ㄺ"
+        case ("ㄹ", "ㅁ"): return "ㄻ"
+        case ("ㄹ", "ㅂ"): return "ㄼ"
+        case ("ㄹ", "ㅅ"): return "ㄽ"
+        case ("ㄹ", "ㅌ"): return "ㄾ"
+        case ("ㄹ", "ㅍ"): return "ㄿ"
+        case ("ㄹ", "ㅎ"): return "ㅀ"
+        case ("ㅂ", "ㅅ"): return "ㅄ"
+        default: return nil
+        }
+    }
+
+    static func splitFinal(_ finalCharacter: Character) -> (keep: Character, carry: Character)? {
+        switch finalCharacter {
+        case "ㄳ": return ("ㄱ", "ㅅ")
+        case "ㄵ": return ("ㄴ", "ㅈ")
+        case "ㄶ": return ("ㄴ", "ㅎ")
+        case "ㄺ": return ("ㄹ", "ㄱ")
+        case "ㄻ": return ("ㄹ", "ㅁ")
+        case "ㄼ": return ("ㄹ", "ㅂ")
+        case "ㄽ": return ("ㄹ", "ㅅ")
+        case "ㄾ": return ("ㄹ", "ㅌ")
+        case "ㄿ": return ("ㄹ", "ㅍ")
+        case "ㅀ": return ("ㄹ", "ㅎ")
+        case "ㅄ": return ("ㅂ", "ㅅ")
+        default: return nil
+        }
+    }
+
+    /// What should replace `base` (the last storage character) when the single
+    /// jamo `incoming` arrives right after it. Returns nil when nothing may
+    /// merge and the caller must pass the jamo through untouched.
+    ///
+    /// Rules mirror standard two-set Korean typing:
+    /// - Consonant after a syllable without a final attaches as the final
+    ///   (가+ㄱ → 각); a compatible consonant extends an existing single final
+    ///   into a double final (돌+ㄱ → 돐). Incompatible consonants start a new
+    ///   syllable and pass through.
+    /// - A vowel after a syllable carrying a final resyllabifies: the final
+    ///   moves down to lead the next syllable (간+ㅏ → 가나, 닭+ㅏ → 다가).
+    static func replacement(for base: Character, incoming: Character) -> String? {
+        guard let syl = decompose(base) else { return nil }
+
+        if !isVowelJamo(incoming), let incomingFinal = jongseongIndex(of: incoming), incomingFinal != 0 {
+            switch syl.finalCharacter {
+            case .none:
+                return String(compose(initial: syl.initial, medial: syl.medial, final: incomingFinal))
+            case .some(let current):
+                guard let extended = doubleFinal(first: current, second: incoming),
+                      let extendedIndex = jongseongIndex(of: extended), extendedIndex != 0 else { return nil }
+                return String(compose(initial: syl.initial, medial: syl.medial, final: extendedIndex))
+            }
+        }
+
+        if isVowelJamo(incoming), syl.final != 0,
+           let carried = syl.finalCharacter,
+           let medialIndex = jungseongOrder.firstIndex(of: incoming) {
+            let keepIndex: Int
+            let carry: Character
+            if let split = splitFinal(carried),
+               let kept = jongseongIndex(of: split.keep), kept != 0 {
+                keepIndex = kept
+                carry = split.carry
+            } else {
+                keepIndex = 0
+                carry = carried
+            }
+            guard let carryInitial = choseongOrder.firstIndex(of: carry) else { return nil }
+            let keptSyllable = compose(initial: syl.initial, medial: syl.medial, final: keepIndex)
+            let carriedSyllable = compose(initial: carryInitial, medial: medialIndex, final: 0)
+            return String(keptSyllable) + String(carriedSyllable)
+        }
+
+        return nil
+    }
+}
+#endif

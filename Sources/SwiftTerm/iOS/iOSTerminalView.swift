@@ -1964,6 +1964,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         // IME exactly, the corrections land precisely on their own.
         resetKoreanResyllabificationTransaction()
 
+        // Hardware keyboards deliver 받침 jamo bare, with no follow-up
+        // correction; compose locally (rationale: HangulComposition).
+        if applyLocalHangulCompositionIfPossible(text) {
+            return
+        }
+
         beginTextInputEdit()
 
         let rangeToReplace = _markedTextRange ?? _selectedTextRange
@@ -2038,6 +2044,43 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     func insertTextFromAccessory(_ text: String) {
         commitTextInput(text, applyModifiers: false)
     }
+
+    private func applyLocalHangulCompositionIfPossible(_ text: String) -> Bool {
+        guard text.count == 1,
+              let incoming = text.first,
+              _markedTextRange == nil,
+              _selectedTextRange.isEmpty,
+              _selectedTextRange.endPosition.offset == textInputStorage.textInputUTF16Count,
+              let base = textInputStorage.last,
+              let composed = HangulComposition.replacement(for: base, incoming: incoming) else {
+            return false
+        }
+
+        pendingAutoPeriodDeleteWasSpace = false
+        uitiLog("commitTextInput hangul-compose storage:\(textInputStorage.debugDescription) +\(text.debugDescription) -> \(composed.debugDescription)")
+
+        beginTextInputEdit()
+        let tailOffset = textInputStorage.textInputUTF16Count
+        let replacedRange = textInputStorage.textInputRange(
+            startUTF16Offset: tailOffset - 1, endUTF16Offset: tailOffset)
+        textInputStorage.replaceSubrange(replacedRange, with: composed)
+        let caret = TextPosition(offset: textInputStorage.textInputValidUTF16Offset(
+            textInputStorage.textInputUTF16Count, rounding: .forward))
+        _selectedTextRange = TextRange(from: caret, to: caret)
+        endTextInputEdit()
+
+        // The replaced syllable was already echoed, so undo it on the wire first.
+        sendBackspaceKey()
+        if !terminal.keyboardEnhancementFlags.isEmpty {
+            sendKittyTextInput(composed, applyModifiers: false)
+        } else {
+            send(txt: composed)
+        }
+
+        queuePendingDisplay()
+        return true
+    }
+
 
     /*
         Soft keyboard input. Hardware keyboard text input is delivered here; special keys are handled in pressesBegan.
