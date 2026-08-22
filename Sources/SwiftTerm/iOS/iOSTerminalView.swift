@@ -2609,10 +2609,16 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             // pressing the backspace, it will delete chunks of text at a time.
             let oldText = textInputStorage[rangeToDelete.fullRange(in: textInputStorage)]
             resetKoreanResyllabificationTransaction()
-            // Deleting marked text owes backspaces only for characters that
-            // were echoed before the IME composed over them.
-            let backspaces = min(echoedCharsUnderMark, oldText.count)
-            echoedCharsUnderMark = 0
+            let backspaces: Int
+            if _markedTextRange != nil {
+                // Marked composition never reached the terminal; only
+                // characters echoed before the IME composed over them are owed.
+                backspaces = min(echoedCharsUnderMark, oldText.count)
+                echoedCharsUnderMark = 0
+            } else {
+                // A plain selection covers committed, already-echoed text.
+                backspaces = oldText.count
+            }
             for _ in 0..<backspaces {
                 self.sendBackspaceKey()
             }
