@@ -64,7 +64,7 @@ import CoreGraphics
 internal func uitiLog (_ message: @autoclosure () -> String) {
     guard TerminalView.textInputDebugEnabled else { return }
     TerminalView.textInputLogCounter += 1
-    print ("UITextInput[\(TerminalView.textInputLogCounter)]: \(message())")
+    TerminalView.logTextInputDebug("UITextInput[\(TerminalView.textInputLogCounter)]: \(message())")
 }
 
 extension TerminalView: UITextInput {    

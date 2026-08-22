@@ -2671,8 +2671,8 @@ extension TerminalView {
         #if os(iOS) || os(visionOS)
         if TerminalView.textInputDebugEnabled {
             let previewBytes = data.prefix(32).map { String(format: "%02X", $0) }.joined(separator: " ")
-            print("UITextInput[\(TerminalView.textInputLogCounter + 1)]: send bytes=\(data.count) [\(previewBytes)]")
             TerminalView.textInputLogCounter += 1
+            TerminalView.logTextInputDebug("UITextInput[\(TerminalView.textInputLogCounter)]: send bytes=\(data.count) [\(previewBytes)]")
         }
         #endif
         terminal.registerUserInput(data)
@@ -2686,8 +2686,8 @@ extension TerminalView {
     public func send (txt: String) {
         #if os(iOS) || os(visionOS)
         if TerminalView.textInputDebugEnabled {
-            print("UITextInput[\(TerminalView.textInputLogCounter + 1)]: send txt=\(txt.debugDescription)")
             TerminalView.textInputLogCounter += 1
+            TerminalView.logTextInputDebug("UITextInput[\(TerminalView.textInputLogCounter)]: send txt=\(txt.debugDescription)")
         }
         #endif
         let array = [UInt8] (txt.utf8)

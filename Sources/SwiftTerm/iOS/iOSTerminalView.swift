@@ -58,8 +58,36 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         case completed
     }
 
+    #if DEBUG
+    public static var textInputDebugEnabled = true
+    #else
     public static var textInputDebugEnabled: Bool = ProcessInfo.processInfo.environment["SWIFTTERM_TEXT_INPUT_DEBUG"] == "1"
+    #endif
     internal static var textInputLogCounter: Int = 0
+
+    /// On-device capture of the input trace, pulled from the app container
+    /// with devicectl when diagnosing IME bugs without a debugger attached.
+    /// Truncated on first use per process so each run starts clean.
+    static var textInputDebugFileHandle: FileHandle? = {
+        #if DEBUG
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("coterm-uitextinput.log")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
+        handle.truncate(atOffset: 0)
+        return handle
+        #else
+        return nil
+        #endif
+    }()
+
+    static func logTextInputDebug(_ line: String) {
+        guard textInputDebugEnabled else { return }
+        print(line)
+        textInputDebugFileHandle?.write((line + "\n").data(using: .utf8)!)
+    }
 
     struct FontSet {
         public let normal: UIFont
