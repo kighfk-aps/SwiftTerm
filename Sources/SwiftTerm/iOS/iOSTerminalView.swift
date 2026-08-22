@@ -76,7 +76,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }
         guard let handle = try? FileHandle(forWritingTo: url) else { return nil }
-        handle.truncate(atOffset: 0)
+        try? handle.truncate(atOffset: 0)
         return handle
         #else
         return nil
