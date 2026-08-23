@@ -2192,7 +2192,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// Emits held jamo bytes verbatim for ambiguous transitions (selection
     /// moved away, marked text starting). Storage is already correct; this is
     /// lossless and at worst reproduces the raw-jamo behavior of stock iOS.
-    private func flushHeldHangulAsRaw() {
+    func flushHeldHangulAsRaw() {
         guard let held = heldHangulJamo else { return }
         heldHangulJamo = nil
         uitiLog("commitTextInput hangul-flush raw \(held.chars.debugDescription)")
