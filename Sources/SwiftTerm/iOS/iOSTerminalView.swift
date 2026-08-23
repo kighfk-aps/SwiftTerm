@@ -52,12 +52,6 @@ public extension Notification.Name {
  * defaults, otherwise, this uses its own set of defaults colors.
  */
 open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollViewDelegate, TerminalDelegate, UIPointerInteractionDelegate {
-    private enum PendingKoreanResyllabificationResult {
-        case none
-        case prefixReinserted
-        case completed
-    }
-
     #if DEBUG
     public static var textInputDebugEnabled = true
     #else
@@ -286,37 +280,30 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // We use this as temporary storage for UITextInput, which we send to the terminal on demand
     var textInputStorage: String = ""
     var pendingAutoPeriodDeleteWasSpace: Bool = false
-    private var koreanResyllabificationTransaction = HangulInput.ResyllabificationTransaction()
 
-    func resetKoreanResyllabificationTransaction() {
-        koreanResyllabificationTransaction.reset()
-    }
+    /// Exactly the text this view has written to the PTY out of the current
+    /// input buffer. Every wire edit is a diff against this, so the number of
+    /// DELs can never drift from what the remote actually received.
+    var wireSentText: String = ""
+
+    /// The tail of the input buffer that is still being composed. It has not
+    /// been sent anywhere; the view draws it itself (see `updatePreeditView`).
+    public private(set) var composingText: String = ""
+
+    /// Whether this input buffer has seen marked text.
+    ///
+    /// A keyboard that marks its composition tells us exactly what is
+    /// provisional and unmarks when it is done, so we trust it. The Korean
+    /// hardware keyboard never marks anything, and that is the only case where
+    /// we have to guess at the volatile tail ourselves.
+    var imeUsesMarkedText = false
+
+    /// Draws `composingText` over the terminal at the caret.
+    var preeditView: UILabel?
 
     // This tracks the marked text, part of the UITextInput protocol, which is used to flag temporary data entry, that might
     // be removed afterwards by the input system (input methods will insert approximiations, mark and change on demand)
     var _markedTextRange: TextRange?
-
-    /// Marked text itself is never echoed; these are characters the IME
-    /// composed over that had already been sent, so they alone owe
-    /// backspaces when the marked span goes away.
-    var echoedCharsUnderMark = 0
-
-    /// Trailing consonant jamo(s) whose bytes are withheld from the wire while
-    /// iOS's Korean hardware IME still owns them: it treats such jamo as
-    /// new-syllable initials and corrects them with span surgery, so they sit
-    /// in `textInputStorage` untouched until a commit boundary (space,
-    /// newline, punctuation, non-Hangul) proves they were batchim.
-    struct HangulHold {
-        var baseOffset: Int // UTF-16 offset of the syllable the jamo follows
-        var chars: String   // 1...2 held consonants at the storage tail
-    }
-
-    var heldHangulJamo: HangulHold?
-
-    /// Set when the selection moves off the storage tail while a hold is
-    /// active. The next event decides: a deleteBackward covering the tail is
-    /// IME surgery (keep holding), anything else flushes the jamo verbatim.
-    var flushHeldHangulBeforeNextEdit = false
 
     // The input delegate is part of UITextInput, and we notify it of changes.
     public weak var inputDelegate: UITextInputDelegate?
@@ -1969,24 +1956,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             pendingAutoPeriodDeleteWasSpace = false
         }
 
-        // The Korean composition heuristics (compose-final, resyllabify, and the
-        // delete/reinsert transaction) were built for the delivery model of
-        // SwiftTerm issue #563, where the keyboard committed syllable states
-        // without corrections. Current iPadOS delivers the first jamo of a new
-        // syllable as a bare insertText and then corrects itself with
-        // select + deleteBackward + insertText spans. Composing the bare jamo
-        // into the previous syllable desynced the storage character count from
-        // the IME's document model, corrupting every subsequent range the IME
-        // selected (observed on-device, 2026-08). With storage mirroring the
-        // IME exactly, the corrections land precisely on their own.
-        resetKoreanResyllabificationTransaction()
-
-        // Hardware keyboards deliver trailing consonants bare and never attach
-        // batchim themselves; hold such jamo off the wire until a signal
-        // disambiguates batchim from a new-syllable initial (rationale:
-        // HangulComposition).
-        let holdOutcome = reconcileHangulHold(with: text)
-        if case .handled = holdOutcome {
+        // Enter ends the line. Settle whatever is still composing, drop the
+        // buffer, and let the terminal's own return sequence through.
+        if text == "\n" {
+            flushInputBuffer()
+            resetInputBuffer()
+            self.send(data: returnByteSequence [0...])
             queuePendingDisplay()
             return
         }
@@ -2003,19 +1978,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
 
         let rangeStartIndex = rangeToReplace.startPosition.offset
-        // Range-replacing inserts (IME selection edits, e.g. the Korean keyboard
-        // replacing a selected span after a language toggle) must erase the text
-        // they replace on the terminal, mirroring what `replace(_:)` does.
-        // Marked text is uncommitted composition that was never echoed, so it
-        // must not produce backspaces.
-        var replacedCharCount = 0
-        if _markedTextRange == nil, !rangeToReplace.isEmpty {
-            replacedCharCount = textInputStorage[rangeToReplace.fullRange(in: textInputStorage)].count
-        }
-        // A mark composed over previously echoed characters owes those
-        // backspaces on commit; a fresh mark owes nothing.
-        let echoBackspaces = _markedTextRange == nil ? 0 : echoedCharsUnderMark
-        echoedCharsUnderMark = 0
+        // Whatever this insert replaces is reconciled by the wire diff below;
+        // no range needs its own backspace bookkeeping any more.
         textInputStorage.replaceSubrange(rangeToReplace.fullRange(in: textInputStorage), with: textToInsert)
         _markedTextRange = nil
         let insertedOffset = textInputStorage.textInputValidUTF16Offset(
@@ -2026,45 +1990,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
         endTextInputEdit()
 
-        if case .held(let hold) = holdOutcome {
-            heldHangulJamo = hold
-            queuePendingDisplay()
-            return
-        }
-
-        if replacedCharCount > 0 {
-            uitiLog("commitTextInput range-replace backspaces:\(replacedCharCount)")
-            for _ in 0..<replacedCharCount {
-                sendBackspaceKey()
-            }
-        }
-
-        if echoBackspaces > 0 {
-            uitiLog("commitTextInput mark-overlay backspaces:\(echoBackspaces)")
-            for _ in 0..<echoBackspaces {
-                sendBackspaceKey()
-            }
-        }
-
-        if !terminal.keyboardEnhancementFlags.isEmpty {
-            sendKittyTextInput(textToInsert, applyModifiers: applyModifiers)
-        } else if applyModifiers && (terminalAccessory?.controlModifier ?? controlModifier ?? false) {
-            self.send(applyControlToEventCharacters(textToInsert))
-            terminalAccessory?.controlModifier = false
-            controlModifier = false
-        } else if applyModifiers && metaModifier {
-            self.send([0x1b])
-            self.send(txt: text)
-            metaModifier = false
-        } else {
-            if textToInsert == "\n" {
-                resetInputBuffer()
-                self.send(data: returnByteSequence [0...])
-            } else {
-                self.send(txt: textToInsert)
-            }
-        }
-
+        syncInputWire(applyModifiers: applyModifiers)
         queuePendingDisplay()
     }
 
@@ -2072,135 +1998,123 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         commitTextInput(text, applyModifiers: false)
     }
 
-    private enum HangulHoldOutcome {
-        case proceed
-        case held(HangulHold)
-        case handled
-    }
-
-    /// Decides what the incoming insert means for an active (or new) Hangul
-    /// hold. Runs before the caller's storage update; a `.held` outcome carries
-    /// the hold to activate once the caller has appended the text.
-    private func reconcileHangulHold(with text: String) -> HangulHoldOutcome {
-        if flushHeldHangulBeforeNextEdit {
-            flushHeldHangulBeforeNextEdit = false
-            flushHeldHangulAsRaw()
-        }
-
-        guard text.count == 1, let incoming = text.first else {
-            resolveHeldHangulAsBatchim()
-            return .proceed
-        }
-
-        if HangulComposition.isVowelJamo(incoming) {
-            // Traces show the IME performs span surgery itself when a vowel
-            // continues a bare trailing jamo, so a direct vowel here is rare;
-            // when it happens, finish the composition locally.
-            guard heldHangulJamo != nil else { return .proceed }
-            resolveHeldHangulAsBatchim()
-            resyllabifyTrailingSyllable(with: incoming)
-            return .handled
-        }
-
-        if HangulComposition.isConsonantJamo(incoming) {
-            if var held = heldHangulJamo, held.chars.count < 2 {
-                held.chars.append(incoming)
-                heldHangulJamo = held
-                return .held(held)
-            }
-            resolveHeldHangulAsBatchim()
-            if let baseOffset = hangulHoldBaseCandidate() {
-                let hold = HangulHold(baseOffset: baseOffset, chars: String(incoming))
-                heldHangulJamo = hold
-                return .held(hold)
-            }
-            return .proceed
-        }
-
-        resolveHeldHangulAsBatchim()
-        return .proceed
-    }
-
-    /// UTF-16 offset of the syllable a new hold could attach to, provided the
-    /// caret is empty, at the storage tail, no marked text exists, and the
-    /// last character is a completed Hangul syllable.
-    private func hangulHoldBaseCandidate() -> Int? {
-        guard _markedTextRange == nil,
-              _selectedTextRange.isEmpty,
-              _selectedTextRange.endPosition.offset == textInputStorage.textInputUTF16Count,
-              let lastChar = textInputStorage.last,
-              HangulComposition.decompose(lastChar) != nil else {
-            return nil
-        }
-        return textInputStorage.textInputUTF16Count - 1
-    }
-
-    /// Composes the held jamo onto their base syllable at a commit boundary.
-    /// Only the base syllable was ever echoed, so one backspace erases it.
-    private func resolveHeldHangulAsBatchim() {
-        guard let held = heldHangulJamo else { return }
-        heldHangulJamo = nil
-
-        let endOffset = textInputStorage.textInputUTF16Count
-        guard held.baseOffset >= 0, held.baseOffset < endOffset else { return }
-        let span = textInputStorage.textInputRange(
-            startUTF16Offset: held.baseOffset, endUTF16Offset: endOffset)
-        let baseChar = textInputStorage[span].first ?? " "
-        let replacement = HangulComposition.chainReplacement(base: baseChar, jamos: held.chars)
-
-        uitiLog("commitTextInput hangul-resolve storage:\(textInputStorage.debugDescription) -> \(replacement.debugDescription)")
-        beginTextInputEdit()
-        textInputStorage.replaceSubrange(span, with: replacement)
-        let caret = TextPosition(offset: textInputStorage.textInputValidUTF16Offset(
-            textInputStorage.textInputUTF16Count, rounding: .forward))
-        _selectedTextRange = TextRange(from: caret, to: caret)
-        endTextInputEdit()
-
-        sendBackspaceKey()
-        if !terminal.keyboardEnhancementFlags.isEmpty {
-            sendKittyTextInput(replacement, applyModifiers: false)
+    /// Reconciles the PTY with the settled part of the input buffer.
+    ///
+    /// The IME's document is read, never rewritten. Everything the IME may
+    /// still revise stays in `composingText`, which this view draws itself, so
+    /// no speculative byte is ever written to the terminal and no DEL is ever
+    /// owed for one. See `HangulPreedit` for the split rule.
+    func syncInputWire(applyModifiers: Bool = false) {
+        let commit: String
+        let composing: String
+        if let marked = _markedTextRange, !marked.isEmpty {
+            // Marked text is uncommitted by definition, whatever the language.
+            let range = marked.fullRange(in: textInputStorage)
+            commit = String(textInputStorage[textInputStorage.startIndex..<range.lowerBound])
+            composing = String(textInputStorage[range.lowerBound...])
+        } else if imeUsesMarkedText {
+            // The keyboard commits explicitly; nothing is left provisional.
+            commit = HangulPreedit.composeDocument(textInputStorage)
+            composing = ""
         } else {
-            send(txt: replacement)
+            (commit, composing) = HangulPreedit.split(textInputStorage)
+        }
+
+        let edit = HangulPreedit.wireEdit(sent: wireSentText, commit: commit)
+        if edit.deletions > 0 {
+            uitiLog("syncInputWire deletions:\(edit.deletions)")
+            for _ in 0..<edit.deletions {
+                sendBackspaceKey()
+            }
+        }
+        if !edit.insertion.isEmpty {
+            uitiLog("syncInputWire insert:\(edit.insertion.debugDescription)")
+            sendCommittedText(edit.insertion, applyModifiers: applyModifiers)
+        }
+        wireSentText = commit
+        setComposingText(composing)
+    }
+
+    /// Settles the whole buffer: whatever is still composing becomes final and
+    /// goes out. Called before any key that is not document text (Enter, Tab,
+    /// arrows, Escape, control chords), because those bypass the IME entirely
+    /// and would otherwise leave the composing tail stranded.
+    public func flushInputBuffer() {
+        let composed = HangulPreedit.composeDocument(textInputStorage)
+        let edit = HangulPreedit.wireEdit(sent: wireSentText, commit: composed)
+        if edit.deletions > 0 {
+            for _ in 0..<edit.deletions {
+                sendBackspaceKey()
+            }
+        }
+        if !edit.insertion.isEmpty {
+            uitiLog("flushInputBuffer insert:\(edit.insertion.debugDescription)")
+            sendCommittedText(edit.insertion, applyModifiers: false)
+        }
+        wireSentText = composed
+        setComposingText("")
+    }
+
+    private func sendCommittedText(_ text: String, applyModifiers: Bool) {
+        if !terminal.keyboardEnhancementFlags.isEmpty {
+            sendKittyTextInput(text, applyModifiers: applyModifiers)
+        } else if applyModifiers && (terminalAccessory?.controlModifier ?? controlModifier ?? false) {
+            self.send(applyControlToEventCharacters(text))
+            terminalAccessory?.controlModifier = false
+            controlModifier = false
+        } else if applyModifiers && metaModifier {
+            self.send([0x1b])
+            self.send(txt: text)
+            metaModifier = false
+        } else {
+            self.send(txt: text)
         }
     }
 
-    /// Finishes a direct vowel insert after a batchim resolution by applying
-    /// standard resyllabification (간+ㅏ → 가나).
-    private func resyllabifyTrailingSyllable(with vowel: Character) {
-        guard let lastChar = textInputStorage.last,
-              let merged = HangulComposition.replacement(for: lastChar, incoming: vowel) else {
+    func setComposingText(_ text: String) {
+        guard composingText != text else { return }
+        composingText = text
+        updatePreeditView()
+    }
+
+    /// Draws the composing tail at the caret.
+    ///
+    /// The remote never sees this text, so nothing echoes it back — the view
+    /// has to show it. A subview is used rather than a custom `draw` pass so
+    /// the Metal and CoreGraphics renderers behave identically. It is
+    /// underlined, the usual mark for provisional IME text.
+    func updatePreeditView() {
+        guard !composingText.isEmpty else {
+            preeditView?.removeFromSuperview()
             return
         }
-        beginTextInputEdit()
-        let tailOffset = textInputStorage.textInputUTF16Count
-        let replacedRange = textInputStorage.textInputRange(
-            startUTF16Offset: tailOffset - 1, endUTF16Offset: tailOffset)
-        textInputStorage.replaceSubrange(replacedRange, with: merged)
-        let caret = TextPosition(offset: textInputStorage.textInputValidUTF16Offset(
-            textInputStorage.textInputUTF16Count, rounding: .forward))
-        _selectedTextRange = TextRange(from: caret, to: caret)
-        endTextInputEdit()
-
-        sendBackspaceKey()
-        if !terminal.keyboardEnhancementFlags.isEmpty {
-            sendKittyTextInput(merged, applyModifiers: false)
+        let label: UILabel
+        if let existing = preeditView {
+            label = existing
         } else {
-            send(txt: merged)
+            label = UILabel()
+            label.isUserInteractionEnabled = false
+            label.baselineAdjustment = .alignCenters
+            preeditView = label
         }
-    }
-
-    /// Emits held jamo bytes verbatim for ambiguous transitions (selection
-    /// moved away, marked text starting). Storage is already correct; this is
-    /// lossless and at worst reproduces the raw-jamo behavior of stock iOS.
-    func flushHeldHangulAsRaw() {
-        guard let held = heldHangulJamo else { return }
-        heldHangulJamo = nil
-        uitiLog("commitTextInput hangul-flush raw \(held.chars.debugDescription)")
-        if !terminal.keyboardEnhancementFlags.isEmpty {
-            sendKittyTextInput(held.chars, applyModifiers: false)
-        } else {
-            send(txt: held.chars)
+        label.backgroundColor = nativeBackgroundColor
+        label.attributedText = NSAttributedString(
+            string: composingText,
+            attributes: [
+                .font: fontSet.normal,
+                .foregroundColor: nativeForegroundColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+            ])
+        label.sizeToFit()
+        if label.superview == nil {
+            addSubview(label)
         }
+        let origin = caretView?.frame.origin ?? CGPoint.zero
+        label.frame = CGRect(x: origin.x,
+                             y: origin.y,
+                             width: max(label.frame.width, cellDimension.width),
+                             height: cellDimension.height)
+        bringSubviewToFront(label)
     }
 
 
@@ -2595,127 +2509,6 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                                          composing: kittyIsComposing))
     }
 
-    // this is necessary because something in the iOS IME seems to prevent
-    // the sequence  "ㅇ", "ㅜ", "ㅇ" from becoming "웅", and instead
-    // it becomes "우" followed by "ㅇ"
-    private func tryComposeKoreanFinal(_ text: String) -> Bool {
-        guard isKoreanTextInput else { return false }
-        guard _markedTextRange == nil else { return false }
-        guard _selectedTextRange.isEmpty, _selectedTextRange.endPosition.offset == textInputStorage.textInputUTF16Count else { return false }
-        guard text.count == 1, let jamo = text.first else { return false }
-        guard let finalIndex = HangulInput.finalIndexByJamo[jamo] else { return false }
-        guard let lastChar = textInputStorage.last else { return false }
-        guard let composed = HangulInput.composeSyllable(base: lastChar, finalIndex: finalIndex) else { return false }
-
-        uitiLog("koreanComposeFinal base:\(lastChar) jamo:\(jamo) -> \(composed)")
-
-        beginTextInputEdit()
-        textInputStorage.removeLast()
-        textInputStorage.append(composed)
-        let newOffset = textInputStorage.textInputUTF16Count
-        _markedTextRange = nil
-        _selectedTextRange = TextRange(from: TextPosition(offset: newOffset), to: TextPosition(offset: newOffset))
-        endTextInputEdit()
-
-        sendBackspaceKey()
-        send(txt: String(composed))
-        queuePendingDisplay()
-        return true
-    }
-
-    /// Completes the delete -> prefix reinsert -> composed syllable sequence
-    /// emitted by the Korean iOS keyboard when it moves a final consonant to
-    /// the next syllable. When there was a character before the base syllable,
-    /// replace UIKit's reinserted prefix with the complete corrected text. At
-    /// the start of the input buffer, append the corrected text directly.
-    private func processPendingKoreanResyllabification(_ text: String) -> PendingKoreanResyllabificationResult {
-        guard isKoreanTextInput,
-              _markedTextRange == nil,
-              _selectedTextRange.isEmpty,
-              _selectedTextRange.endPosition.offset == textInputStorage.textInputUTF16Count else {
-            resetKoreanResyllabificationTransaction()
-            return .none
-        }
-
-        switch koreanResyllabificationTransaction.consumeInsertion(text) {
-        case .noMatch:
-            return .none
-        case .prefixReinserted:
-            return .prefixReinserted
-        case let .replacement(edit):
-            guard edit.charactersToDelete <= textInputStorage.count else {
-                return .none
-            }
-            if edit.charactersToDelete > 0 {
-                let textToReplace = String(textInputStorage.suffix(edit.charactersToDelete))
-                guard edit.textToInsert.hasPrefix(textToReplace) else { return .none }
-            }
-
-            uitiLog("koreanResyllabifyTransaction delete:\(edit.charactersToDelete) insert:\(edit.textToInsert.debugDescription)")
-
-            beginTextInputEdit()
-            for _ in 0..<edit.charactersToDelete {
-                textInputStorage.removeLast()
-            }
-            textInputStorage.append(contentsOf: edit.textToInsert)
-            let newOffset = textInputStorage.textInputUTF16Count
-            _markedTextRange = nil
-            _selectedTextRange = TextRange(from: TextPosition(offset: newOffset), to: TextPosition(offset: newOffset))
-            endTextInputEdit()
-
-            for _ in 0..<edit.charactersToDelete {
-                sendBackspaceKey()
-            }
-            send(txt: edit.textToInsert)
-            queuePendingDisplay()
-            return .completed
-        }
-    }
-
-    // If a vowel follows a syllable with a final consonant, Korean IMEs can
-    // reinterpret that final consonant as the initial consonant of the next
-    // syllable. For example, "핫" + "ㅔ" must replace "핫" with "하세",
-    // preserving the previous syllable instead of sending only "세".
-    private func tryResyllabifyKoreanFinalBeforeVowel(_ text: String) -> Bool {
-        guard isKoreanTextInput else { return false }
-        guard _markedTextRange == nil else { return false }
-        guard _selectedTextRange.isEmpty, _selectedTextRange.endPosition.offset == textInputStorage.textInputUTF16Count else { return false }
-        guard text.count == 1, let vowel = text.first else { return false }
-        guard HangulInput.vowelIndexByJamo[vowel] != nil else { return false }
-        guard let lastChar = textInputStorage.last else { return false }
-        guard let edit = HangulInput.resyllabificationEdit(base: lastChar, followingVowel: vowel) else { return false }
-
-        uitiLog("koreanResyllabifyFinal base:\(lastChar) vowel:\(vowel) delete:\(edit.charactersToDelete) insert:\(edit.textToInsert.debugDescription)")
-
-        beginTextInputEdit()
-        for _ in 0..<edit.charactersToDelete {
-            textInputStorage.removeLast()
-        }
-        textInputStorage.append(contentsOf: edit.textToInsert)
-        let newOffset = textInputStorage.textInputUTF16Count
-        _markedTextRange = nil
-        _selectedTextRange = TextRange(from: TextPosition(offset: newOffset), to: TextPosition(offset: newOffset))
-        endTextInputEdit()
-
-        for _ in 0..<edit.charactersToDelete {
-            sendBackspaceKey()
-        }
-        send(txt: edit.textToInsert)
-        queuePendingDisplay()
-        return true
-    }
-
-    private func trackKoreanResyllabificationDeletion(_ deletedText: Substring, range: TextRange) {
-        guard isKoreanTextInput,
-              _markedTextRange == nil,
-              range.endPosition.offset == textInputStorage.textInputUTF16Count else {
-            resetKoreanResyllabificationTransaction()
-            return
-        }
-
-        koreanResyllabificationTransaction.begin(deletedText: String(deletedText))
-    }
-
     func ensureCaretIsVisible ()
     {
         guard !terminal.synchronizedOutputActive else { return }
@@ -2732,50 +2525,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     open func deleteBackward() {
         uitiLog("deleteBackward() \(textInputStateDescription())")
 
-        var treatAsSurgery = false
-        if flushHeldHangulBeforeNextEdit {
-            flushHeldHangulBeforeNextEdit = false
-            let range = _markedTextRange ?? _selectedTextRange
-            let endOffset = textInputStorage.textInputUTF16Count
-            if range.endPosition.offset == endOffset,
-               range.startPosition.offset <= endOffset - (heldHangulJamo?.chars.count ?? 0) {
-                treatAsSurgery = true
-            } else {
-                flushHeldHangulAsRaw()
-            }
-        }
-
-        // after backward deletion, marked range is always cleared, and length of selected range is always zero
         let rangeToDelete = _markedTextRange ?? _selectedTextRange
         var rangeStartPosition = rangeToDelete.startPosition
-        var rangeStartIndex = rangeStartPosition.offset
+
         if rangeToDelete.isEmpty {
-            resetKoreanResyllabificationTransaction()
-
-            if rangeStartIndex == textInputStorage.textInputUTF16Count,
-               let held = heldHangulJamo, !held.chars.isEmpty {
-                // A held jamo was never echoed: popping it costs no wire DEL.
-                beginTextInputEdit()
-                let tail = textInputStorage.textInputRange(
-                    startUTF16Offset: rangeStartIndex - 1, endUTF16Offset: rangeStartIndex)
-                textInputStorage.removeSubrange(tail)
-                var updated = held
-                updated.chars.removeLast()
-                heldHangulJamo = updated.chars.isEmpty ? nil : updated
-                let caret = TextPosition(offset: rangeStartIndex - 1)
-                _selectedTextRange = TextRange(from: caret, to: caret)
-                endTextInputEdit()
-                pendingAutoPeriodDeleteWasSpace = false
-                uitiLog("deleteBackward() popped held jamo without wire DEL")
-                return
-            }
-
-            // If there is no selected text, delete the character before the cursor
-
+            let rangeStartIndex = rangeStartPosition.offset
             if rangeStartIndex == 0 {
-                // This is the case when the user hits backspace, but there is no text in the
-                // text input buffer.  This happens for example when text has been pasted.
-                // In that scenario, we should just send the backspace character to the terminal
+                // Nothing of ours to delete — the line belongs to the remote
+                // (pasted text, shell output). Let the key through as-is.
                 pendingAutoPeriodDeleteWasSpace = false
                 self.sendBackspaceKey()
                 uitiLog("deleteBackward() no text to delete, sending backspace")
@@ -2791,53 +2548,28 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 endTextInputEdit()
                 return
             }
-            rangeStartIndex = textInputStorage.textInputUTF16Offset(of: deleteRange.lowerBound)
             let deletedChar = textInputStorage[deleteRange]
-            let deletingAtEnd = rangeStartPosition.offset == textInputStorage.textInputUTF16Count
+            let deletingAtEnd = rangeStartIndex == textInputStorage.textInputUTF16Count
             pendingAutoPeriodDeleteWasSpace = deletingAtEnd && deletedChar == " " && _markedTextRange == nil
             textInputStorage.removeSubrange(deleteRange)
-            rangeStartPosition = TextPosition(offset: rangeStartIndex)
-
-            self.sendBackspaceKey()
+            rangeStartPosition = TextPosition(
+                offset: textInputStorage.textInputUTF16Offset(of: deleteRange.lowerBound))
         } else {
             pendingAutoPeriodDeleteWasSpace = false
             beginTextInputEdit()
-            // Send as many backspaces that are in the range to delete. When on auto-repeat, after a some time
-            // pressing the backspace, it will delete chunks of text at a time.
-            let oldText = textInputStorage[rangeToDelete.fullRange(in: textInputStorage)]
-            resetKoreanResyllabificationTransaction()
-            let backspaces: Int
-            if _markedTextRange != nil {
-                // Marked composition never reached the terminal; only
-                // characters echoed before the IME composed over them are owed.
-                backspaces = min(echoedCharsUnderMark, oldText.count)
-                echoedCharsUnderMark = 0
-            } else if treatAsSurgery, let held = heldHangulJamo {
-                // IME surgery over the tail consumes the hold; the held bytes
-                // were never echoed, so subtract them from the DEL count.
-                let heldOverlap = min(
-                    held.chars.count,
-                    max(0, rangeToDelete.endPosition.offset
-                        - max(rangeToDelete.startPosition.offset,
-                              textInputStorage.textInputUTF16Count - held.chars.count)))
-                heldHangulJamo = nil
-                backspaces = oldText.count - heldOverlap
-            } else {
-                // A plain selection covers committed, already-echoed text.
-                backspaces = oldText.count
-            }
-            for _ in 0..<backspaces {
-                self.sendBackspaceKey()
-            }
-
             textInputStorage.removeSubrange(rangeToDelete.fullRange(in: textInputStorage))
         }
-        
+
         _markedTextRange = nil
         _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
 
         endTextInputEdit()
+
+        // The diff decides the wire: characters that were only ever composed
+        // cost nothing, characters the terminal really received cost one DEL.
+        syncInputWire()
     }
+
 
     enum SendData {
         case text(String)
@@ -2946,6 +2678,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                                                    shiftedKey: nil,
                                                    baseLayoutKey: nil,
                                                    composing: kittyIsComposing)
+                    if !isKittyModifierKey(functionKey) {
+                        flushInputBuffer()
+                        resetInputBuffer()
+                    }
                     if sendKittyEvent(pressEvent) {
                         didHandleEvent = true
                         keyRepeat?.invalidate()
@@ -3123,6 +2859,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             }
             if let sendableData = data {
                 didHandleEvent = true
+                // Tab, arrows, Escape and control chords never travel through
+                // the IME, so a composing tail would be stranded behind them.
+                // Settle the buffer first, then let the key out.
+                flushInputBuffer()
+                resetInputBuffer()
                 keyRepeat?.invalidate()
                 keyRepeat = Timer (fire: Date(timeInterval: 0.4, since: Date()),
                                    interval: 0.1,

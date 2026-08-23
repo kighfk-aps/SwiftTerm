@@ -145,7 +145,6 @@ extension TerminalView: UITextInput {
         guard let r = coerceTextRange(range) else { return }
 
         guard _markedTextRange == nil else { return }
-        resetKoreanResyllabificationTransaction()
         uitiLog ("replace(range:\(r), withText:\(text.debugDescription)) \(textInputStateDescription())")
 
         beginTextInputEdit()
@@ -160,12 +159,6 @@ extension TerminalView: UITextInput {
         if let normalized = normalizedAutoPeriodReplacementText(text, oldText: oldText, rangeToReplace: r) {
             replacementText = normalized
         }
-        let backspaces = oldText.count
-        for _ in 0..<backspaces {
-            self.send ([0x7f])
-        }
-        self.send (txt: replacementText)
-
         let insertionIndex = r.startPosition.offset
         textInputStorage.replaceSubrange(r.fullRange(in: textInputStorage), with: replacementText)
         let replacementLength = replacementText.textInputUTF16Count
@@ -185,6 +178,7 @@ extension TerminalView: UITextInput {
         }
 
         endTextInputEdit()
+        syncInputWire()
     }
 
     /*
@@ -209,10 +203,6 @@ extension TerminalView: UITextInput {
                 _selectedTextRange.endPosition.offset == nv.endPosition.offset
             if isSame {
                 return
-            }
-            if heldHangulJamo != nil {
-                let staysAtTail = nv.isEmpty && nv.endPosition.offset == textInputStorage.textInputUTF16Count
-                flushHeldHangulBeforeNextEdit = !staysAtTail
             }
             inputDelegate?.selectionWillChange(self)
             _selectedTextRange = nv
@@ -251,9 +241,7 @@ extension TerminalView: UITextInput {
     }
 
     public func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
-        flushHeldHangulAsRaw()
         uitiLog("setMarkedText(\(markedText?.debugDescription ?? "nil"), selectedRange:\(selectedRange)) \(textInputStateDescription())")
-        resetKoreanResyllabificationTransaction()
 
         let rangeToReplace = _markedTextRange ?? _selectedTextRange
         let rangeStartPosition = rangeToReplace.startPosition
@@ -261,11 +249,7 @@ extension TerminalView: UITextInput {
         beginTextInputEdit()
 
         if let newText = markedText {
-            if _markedTextRange == nil {
-                // Composing over an existing selection: those characters were
-                // already echoed and are owed backspaces when this mark goes away.
-                echoedCharsUnderMark = textInputStorage[rangeToReplace.fullRange(in: textInputStorage)].count
-            }
+            imeUsesMarkedText = true
             textInputStorage.replaceSubrange(rangeToReplace.fullRange(in: textInputStorage), with: newText)
             // Figure out the new selection range
             let rangeStartIndex = rangeStartPosition.offset
@@ -282,13 +266,13 @@ extension TerminalView: UITextInput {
             _selectedTextRange = TextRange(from: TextPosition(offset: selectionStartIndex), 
                                            to: TextPosition(offset: selectionEndIndex))
         } else {
-            echoedCharsUnderMark = 0
             textInputStorage.removeSubrange(rangeToReplace.fullRange(in: textInputStorage))
             _markedTextRange = nil
             _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
         }
 
         endTextInputEdit()
+        syncInputWire()
     }
 
     func resetInputBuffer (_ loc: String = #function)
@@ -296,8 +280,9 @@ extension TerminalView: UITextInput {
         uitiLog("resetInputBuffer() from \(loc) \(textInputStateDescription())")
         beginTextInputEdit()
         pendingAutoPeriodDeleteWasSpace = false
-        resetKoreanResyllabificationTransaction()
-        echoedCharsUnderMark = 0
+        wireSentText = ""
+        imeUsesMarkedText = false
+        setComposingText("")
         textInputStorage = ""
         _selectedTextRange = TextRange (from: TextPosition(offset: 0), to: TextPosition(offset: 0))
         _markedTextRange = nil

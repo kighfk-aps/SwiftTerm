@@ -2290,6 +2290,10 @@ extension TerminalView {
         caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(caretCol)), y: lineOrigin.y)
         caretView.frame.size.width = cellDimension.width * doublePosition * CGFloat(cursorColumnWidth)
         caretView.setText (ch: charUnderCursor)
+        #if os(iOS) || os(visionOS)
+        // The composing overlay rides along with the caret.
+        updatePreeditView()
+        #endif
     }
     
     // Does not use a default argument and merge, because it is called back

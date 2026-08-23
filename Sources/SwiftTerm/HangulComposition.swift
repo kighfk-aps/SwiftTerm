@@ -1,22 +1,18 @@
 //
-//  iOSHangulComposition.swift
+//  HangulComposition.swift
 //  SwiftTerm
 //
 //  Narrow local Hangul composition for the hardware-keyboard input path.
 //
 
-#if os(iOS) || os(visionOS)
 import Foundation
 
-/// Pure Hangul syllable arithmetic backing the local composition fallback.
+/// Pure Hangul syllable arithmetic.
 ///
-/// On-device traces (2026-08-22) show that iPadOS Korean hardware keyboards
-/// deliver the leading jamo of every new syllable as a bare `insertText` and
-/// then repair 초성+중성 themselves with select/deleteBackward/insertText
-/// spans — but they never issue any correction for 받침 jamo delivered after a
-/// completed syllable. Those jamo used to reach the PTY verbatim ("가ㄱ"
-/// instead of "각"). Removing this composer therefore reintroduces that bug;
-/// extend it instead when iPadOS changes its delivery model.
+/// Used only to read the IME's document, never to rewrite it: `HangulPreedit`
+/// calls these to work out what a syllable looks like once its bare trailing
+/// jamo are attached. See `HangulPreedit` for why the document itself stays
+/// exactly as the IME left it.
 enum HangulComposition {
     static let choseongOrder: [Character] = [
         "ㄱ", "ㄲ", "ㄴ", "ㄷ", "ㄸ", "ㄹ", "ㅁ", "ㅂ", "ㅃ", "ㅅ",
@@ -80,6 +76,12 @@ enum HangulComposition {
 
     static func isConsonantJamo(_ character: Character) -> Bool {
         !isVowelJamo(character) && jongseongIndex(of: character) != nil
+    }
+
+    /// True for anything the Korean IME can still be composing: a precomposed
+    /// syllable, or a bare compatibility jamo.
+    static func isHangulInput(_ character: Character) -> Bool {
+        decompose(character) != nil || isVowelJamo(character) || isConsonantJamo(character)
     }
 
     /// Attaches `jamos` onto `base` one at a time (받침, then 겹받침). Returns
@@ -186,4 +188,3 @@ enum HangulComposition {
         return nil
     }
 }
-#endif
