@@ -33,7 +33,7 @@ enum HangulPreedit {
     static func composeDocument(_ storage: String) -> String {
         var out = ""
         for character in storage {
-            if HangulComposition.isConsonantJamo(character),
+            if HangulComposition.isHangulInput(character),
                let base = out.last,
                let merged = HangulComposition.replacement(for: base, incoming: character) {
                 out.removeLast()

@@ -139,6 +139,39 @@ enum HangulComposition {
         }
     }
 
+    /// Closes a bare second medial into the compound vowel that the first one
+    /// opens. Only the seven two-set-layer compounds merge here; ㅏ+ㅣ=ㅐ and
+    /// ㅓ+ㅣ=ㅔ are deliberately absent because ㅐ/ㅔ have keys of their own and
+    /// folding them would turn "아이" into "애".
+    static func doubleMedial(first: Character, second: Character) -> Character? {
+        switch (first, second) {
+        case ("ㅗ", "ㅏ"): return "ㅘ"
+        case ("ㅗ", "ㅐ"): return "ㅙ"
+        case ("ㅗ", "ㅣ"): return "ㅚ"
+        case ("ㅜ", "ㅓ"): return "ㅝ"
+        case ("ㅜ", "ㅔ"): return "ㅞ"
+        case ("ㅜ", "ㅣ"): return "ㅟ"
+        case ("ㅡ", "ㅣ"): return "ㅢ"
+        default: return nil
+        }
+    }
+
+    /// The inverse of `doubleMedial`: splits a compound vowel back into its two
+    /// components. The mirror of `splitFinal`, kept for table symmetry and for
+    /// a future backspace decomposition.
+    static func splitMedial(_ medial: Character) -> (keep: Character, carry: Character)? {
+        switch medial {
+        case "ㅘ": return ("ㅗ", "ㅏ")
+        case "ㅙ": return ("ㅗ", "ㅐ")
+        case "ㅚ": return ("ㅗ", "ㅣ")
+        case "ㅝ": return ("ㅜ", "ㅓ")
+        case "ㅞ": return ("ㅜ", "ㅔ")
+        case "ㅟ": return ("ㅜ", "ㅣ")
+        case "ㅢ": return ("ㅡ", "ㅣ")
+        default: return nil
+        }
+    }
+
     /// What should replace `base` (the last storage character) when the single
     /// jamo `incoming` arrives right after it. Returns nil when nothing may
     /// merge and the caller must pass the jamo through untouched.
@@ -148,6 +181,8 @@ enum HangulComposition {
     ///   (가+ㄱ → 각); a compatible consonant extends an existing single final
     ///   into a double final (돌+ㄱ → 돐). Incompatible consonants start a new
     ///   syllable and pass through.
+    /// - A vowel after a syllable without a final closes a compound vowel in
+    ///   place when one exists (오+ㅏ → 와), else passes through.
     /// - A vowel after a syllable carrying a final resyllabifies: for a single
     ///   final the whole consonant moves down (간+ㅏ → 가나); for a double
     ///   final only the second component moves, the first stays as the final
@@ -164,6 +199,14 @@ enum HangulComposition {
                       let extendedIndex = jongseongIndex(of: extended), extendedIndex != 0 else { return nil }
                 return String(compose(initial: syl.initial, medial: syl.medial, final: extendedIndex))
             }
+        }
+
+        // A vowel after a syllable without a final may close a compound vowel
+        // in place (오+ㅏ → 와). When it does not, the vowel passes through.
+        if isVowelJamo(incoming), syl.final == 0,
+           let compound = doubleMedial(first: jungseongOrder[syl.medial], second: incoming),
+           let compoundIndex = jungseongOrder.firstIndex(of: compound) {
+            return String(compose(initial: syl.initial, medial: compoundIndex, final: 0))
         }
 
         if isVowelJamo(incoming), syl.final != 0,
