@@ -210,6 +210,10 @@ extension TerminalView: UITextInput {
             if isSame {
                 return
             }
+            if heldHangulJamo != nil {
+                let staysAtTail = nv.isEmpty && nv.endPosition.offset == textInputStorage.textInputUTF16Count
+                flushHeldHangulBeforeNextEdit = !staysAtTail
+            }
             inputDelegate?.selectionWillChange(self)
             _selectedTextRange = nv
             uitiLog ("selectedTextRange -> \(_selectedTextRange)")
@@ -247,6 +251,7 @@ extension TerminalView: UITextInput {
     }
 
     public func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+        flushHeldHangulAsRaw()
         uitiLog("setMarkedText(\(markedText?.debugDescription ?? "nil"), selectedRange:\(selectedRange)) \(textInputStateDescription())")
         resetKoreanResyllabificationTransaction()
 

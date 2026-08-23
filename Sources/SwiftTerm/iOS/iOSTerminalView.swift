@@ -301,6 +301,23 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// backspaces when the marked span goes away.
     var echoedCharsUnderMark = 0
 
+    /// Trailing consonant jamo(s) whose bytes are withheld from the wire while
+    /// iOS's Korean hardware IME still owns them: it treats such jamo as
+    /// new-syllable initials and corrects them with span surgery, so they sit
+    /// in `textInputStorage` untouched until a commit boundary (space,
+    /// newline, punctuation, non-Hangul) proves they were batchim.
+    struct HangulHold {
+        var baseOffset: Int // UTF-16 offset of the syllable the jamo follows
+        var chars: String   // 1...2 held consonants at the storage tail
+    }
+
+    var heldHangulJamo: HangulHold?
+
+    /// Set when the selection moves off the storage tail while a hold is
+    /// active. The next event decides: a deleteBackward covering the tail is
+    /// IME surgery (keep holding), anything else flushes the jamo verbatim.
+    var flushHeldHangulBeforeNextEdit = false
+
     // The input delegate is part of UITextInput, and we notify it of changes.
     public weak var inputDelegate: UITextInputDelegate?
 
@@ -1964,9 +1981,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         // IME exactly, the corrections land precisely on their own.
         resetKoreanResyllabificationTransaction()
 
-        // Hardware keyboards deliver 받침 jamo bare, with no follow-up
-        // correction; compose locally (rationale: HangulComposition).
-        if applyLocalHangulCompositionIfPossible(text) {
+        // Hardware keyboards deliver trailing consonants bare and never attach
+        // batchim themselves; hold such jamo off the wire until a signal
+        // disambiguates batchim from a new-syllable initial (rationale:
+        // HangulComposition).
+        let holdOutcome = reconcileHangulHold(with: text)
+        if case .handled = holdOutcome {
+            queuePendingDisplay()
             return
         }
 
@@ -2004,6 +2025,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         _selectedTextRange = TextRange(from: insertedPosition, to: insertedPosition)
 
         endTextInputEdit()
+
+        if case .held(let hold) = holdOutcome {
+            heldHangulJamo = hold
+            queuePendingDisplay()
+            return
+        }
 
         if replacedCharCount > 0 {
             uitiLog("commitTextInput range-replace backspaces:\(replacedCharCount)")
@@ -2045,40 +2072,135 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         commitTextInput(text, applyModifiers: false)
     }
 
-    private func applyLocalHangulCompositionIfPossible(_ text: String) -> Bool {
-        guard text.count == 1,
-              let incoming = text.first,
-              _markedTextRange == nil,
-              _selectedTextRange.isEmpty,
-              _selectedTextRange.endPosition.offset == textInputStorage.textInputUTF16Count,
-              let base = textInputStorage.last,
-              let composed = HangulComposition.replacement(for: base, incoming: incoming) else {
-            return false
+    private enum HangulHoldOutcome {
+        case proceed
+        case held(HangulHold)
+        case handled
+    }
+
+    /// Decides what the incoming insert means for an active (or new) Hangul
+    /// hold. Runs before the caller's storage update; a `.held` outcome carries
+    /// the hold to activate once the caller has appended the text.
+    private func reconcileHangulHold(with text: String) -> HangulHoldOutcome {
+        if flushHeldHangulBeforeNextEdit {
+            flushHeldHangulBeforeNextEdit = false
+            flushHeldHangulAsRaw()
         }
 
-        pendingAutoPeriodDeleteWasSpace = false
-        uitiLog("commitTextInput hangul-compose storage:\(textInputStorage.debugDescription) +\(text.debugDescription) -> \(composed.debugDescription)")
+        guard text.count == 1, let incoming = text.first else {
+            resolveHeldHangulAsBatchim()
+            return .proceed
+        }
 
+        if HangulComposition.isVowelJamo(incoming) {
+            // Traces show the IME performs span surgery itself when a vowel
+            // continues a bare trailing jamo, so a direct vowel here is rare;
+            // when it happens, finish the composition locally.
+            guard heldHangulJamo != nil else { return .proceed }
+            resolveHeldHangulAsBatchim()
+            resyllabifyTrailingSyllable(with: incoming)
+            return .handled
+        }
+
+        if HangulComposition.isConsonantJamo(incoming) {
+            if var held = heldHangulJamo, held.chars.count < 2 {
+                held.chars.append(incoming)
+                heldHangulJamo = held
+                return .held(held)
+            }
+            resolveHeldHangulAsBatchim()
+            if let baseOffset = hangulHoldBaseCandidate() {
+                let hold = HangulHold(baseOffset: baseOffset, chars: String(incoming))
+                heldHangulJamo = hold
+                return .held(hold)
+            }
+            return .proceed
+        }
+
+        resolveHeldHangulAsBatchim()
+        return .proceed
+    }
+
+    /// UTF-16 offset of the syllable a new hold could attach to, provided the
+    /// caret is empty, at the storage tail, no marked text exists, and the
+    /// last character is a completed Hangul syllable.
+    private func hangulHoldBaseCandidate() -> Int? {
+        guard _markedTextRange == nil,
+              _selectedTextRange.isEmpty,
+              _selectedTextRange.endPosition.offset == textInputStorage.textInputUTF16Count,
+              let lastChar = textInputStorage.last,
+              HangulComposition.decompose(lastChar) != nil else {
+            return nil
+        }
+        return textInputStorage.textInputUTF16Count - 1
+    }
+
+    /// Composes the held jamo onto their base syllable at a commit boundary.
+    /// Only the base syllable was ever echoed, so one backspace erases it.
+    private func resolveHeldHangulAsBatchim() {
+        guard let held = heldHangulJamo else { return }
+        heldHangulJamo = nil
+
+        let endOffset = textInputStorage.textInputUTF16Count
+        guard held.baseOffset >= 0, held.baseOffset < endOffset else { return }
+        let span = textInputStorage.textInputRange(
+            startUTF16Offset: held.baseOffset, endUTF16Offset: endOffset)
+        let baseChar = textInputStorage[span].first ?? " "
+        let replacement = HangulComposition.chainReplacement(base: baseChar, jamos: held.chars)
+
+        uitiLog("commitTextInput hangul-resolve storage:\(textInputStorage.debugDescription) -> \(replacement.debugDescription)")
         beginTextInputEdit()
-        let tailOffset = textInputStorage.textInputUTF16Count
-        let replacedRange = textInputStorage.textInputRange(
-            startUTF16Offset: tailOffset - 1, endUTF16Offset: tailOffset)
-        textInputStorage.replaceSubrange(replacedRange, with: composed)
+        textInputStorage.replaceSubrange(span, with: replacement)
         let caret = TextPosition(offset: textInputStorage.textInputValidUTF16Offset(
             textInputStorage.textInputUTF16Count, rounding: .forward))
         _selectedTextRange = TextRange(from: caret, to: caret)
         endTextInputEdit()
 
-        // The replaced syllable was already echoed, so undo it on the wire first.
         sendBackspaceKey()
         if !terminal.keyboardEnhancementFlags.isEmpty {
-            sendKittyTextInput(composed, applyModifiers: false)
+            sendKittyTextInput(replacement, applyModifiers: false)
         } else {
-            send(txt: composed)
+            send(txt: replacement)
         }
+    }
 
-        queuePendingDisplay()
-        return true
+    /// Finishes a direct vowel insert after a batchim resolution by applying
+    /// standard resyllabification (간+ㅏ → 가나).
+    private func resyllabifyTrailingSyllable(with vowel: Character) {
+        guard let lastChar = textInputStorage.last,
+              let merged = HangulComposition.replacement(for: lastChar, incoming: vowel) else {
+            return
+        }
+        beginTextInputEdit()
+        let tailOffset = textInputStorage.textInputUTF16Count
+        let replacedRange = textInputStorage.textInputRange(
+            startUTF16Offset: tailOffset - 1, endUTF16Offset: tailOffset)
+        textInputStorage.replaceSubrange(replacedRange, with: merged)
+        let caret = TextPosition(offset: textInputStorage.textInputValidUTF16Offset(
+            textInputStorage.textInputUTF16Count, rounding: .forward))
+        _selectedTextRange = TextRange(from: caret, to: caret)
+        endTextInputEdit()
+
+        sendBackspaceKey()
+        if !terminal.keyboardEnhancementFlags.isEmpty {
+            sendKittyTextInput(merged, applyModifiers: false)
+        } else {
+            send(txt: merged)
+        }
+    }
+
+    /// Emits held jamo bytes verbatim for ambiguous transitions (selection
+    /// moved away, marked text starting). Storage is already correct; this is
+    /// lossless and at worst reproduces the raw-jamo behavior of stock iOS.
+    private func flushHeldHangulAsRaw() {
+        guard let held = heldHangulJamo else { return }
+        heldHangulJamo = nil
+        uitiLog("commitTextInput hangul-flush raw \(held.chars.debugDescription)")
+        if !terminal.keyboardEnhancementFlags.isEmpty {
+            sendKittyTextInput(held.chars, applyModifiers: false)
+        } else {
+            send(txt: held.chars)
+        }
     }
 
 
@@ -2610,12 +2732,44 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     open func deleteBackward() {
         uitiLog("deleteBackward() \(textInputStateDescription())")
 
+        var treatAsSurgery = false
+        if flushHeldHangulBeforeNextEdit {
+            flushHeldHangulBeforeNextEdit = false
+            let range = _markedTextRange ?? _selectedTextRange
+            let endOffset = textInputStorage.textInputUTF16Count
+            if range.endPosition.offset == endOffset,
+               range.startPosition.offset <= endOffset - (heldHangulJamo?.chars.count ?? 0) {
+                treatAsSurgery = true
+            } else {
+                flushHeldHangulAsRaw()
+            }
+        }
+
         // after backward deletion, marked range is always cleared, and length of selected range is always zero
         let rangeToDelete = _markedTextRange ?? _selectedTextRange
         var rangeStartPosition = rangeToDelete.startPosition
         var rangeStartIndex = rangeStartPosition.offset
         if rangeToDelete.isEmpty {
             resetKoreanResyllabificationTransaction()
+
+            if rangeStartIndex == textInputStorage.textInputUTF16Count,
+               let held = heldHangulJamo, !held.chars.isEmpty {
+                // A held jamo was never echoed: popping it costs no wire DEL.
+                beginTextInputEdit()
+                let tail = textInputStorage.textInputRange(
+                    startUTF16Offset: rangeStartIndex - 1, endUTF16Offset: rangeStartIndex)
+                textInputStorage.removeSubrange(tail)
+                var updated = held
+                updated.chars.removeLast()
+                heldHangulJamo = updated.chars.isEmpty ? nil : updated
+                let caret = TextPosition(offset: rangeStartIndex - 1)
+                _selectedTextRange = TextRange(from: caret, to: caret)
+                endTextInputEdit()
+                pendingAutoPeriodDeleteWasSpace = false
+                uitiLog("deleteBackward() popped held jamo without wire DEL")
+                return
+            }
+
             // If there is no selected text, delete the character before the cursor
 
             if rangeStartIndex == 0 {
@@ -2658,6 +2812,16 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 // characters echoed before the IME composed over them are owed.
                 backspaces = min(echoedCharsUnderMark, oldText.count)
                 echoedCharsUnderMark = 0
+            } else if treatAsSurgery, let held = heldHangulJamo {
+                // IME surgery over the tail consumes the hold; the held bytes
+                // were never echoed, so subtract them from the DEL count.
+                let heldOverlap = min(
+                    held.chars.count,
+                    max(0, rangeToDelete.endPosition.offset
+                        - max(rangeToDelete.startPosition.offset,
+                              textInputStorage.textInputUTF16Count - held.chars.count)))
+                heldHangulJamo = nil
+                backspaces = oldText.count - heldOverlap
             } else {
                 // A plain selection covers committed, already-echoed text.
                 backspaces = oldText.count

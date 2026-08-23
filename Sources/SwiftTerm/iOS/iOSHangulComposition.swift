@@ -78,6 +78,27 @@ enum HangulComposition {
         return (0x314F...0x3163).contains(scalar.value)
     }
 
+    static func isConsonantJamo(_ character: Character) -> Bool {
+        !isVowelJamo(character) && jongseongIndex(of: character) != nil
+    }
+
+    /// Attaches `jamos` onto `base` one at a time (받침, then 겹받침). Returns
+    /// the full replacement string for the base+jamos span; jamo that cannot
+    /// attach stay verbatim at the end (다+ㄹㅋ → 달ㅋ).
+    static func chainReplacement(base: Character, jamos: String) -> String {
+        var current = String(base)
+        for jamo in jamos {
+            guard let merged = replacement(for: current.last ?? base, incoming: jamo),
+                  merged.count == 1 else {
+                current.append(jamo)
+                continue
+            }
+            current.removeLast()
+            current += merged
+        }
+        return current
+    }
+
     static func jongseongIndex(of character: Character) -> Int? {
         jongseongOrder.firstIndex(where: { $0 == character })
     }
