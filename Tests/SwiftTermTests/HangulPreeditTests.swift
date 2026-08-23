@@ -87,6 +87,44 @@ final class HangulPreeditTests: XCTestCase {
         XCTAssertEqual(after.composing, "나")
     }
 
+    // MARK: settle — committed text never becomes uncommitted
+
+    func testSettleMatchesSplitWhenNothingWasSentYet() {
+        let s = HangulPreedit.settle("각 까ㄲ", alreadySent: "")
+        XCTAssertEqual(s.commit, "각 ")
+        XCTAssertEqual(s.composing, "깎")
+    }
+
+    /// The IME starts a syllable after a space by deleting the space and the
+    /// bare jamo together. Plain `split` would push 깎 back into composition
+    /// and owe a DEL for it; the sent text pins it down instead.
+    func testSyllableAlreadySentStaysCommittedWhenTheIMEDropsATrailingSpace() {
+        let s = HangulPreedit.settle("각 까ㄲ", alreadySent: "각 깎 ")
+        XCTAssertEqual(s.commit, "각 깎")
+        XCTAssertEqual(s.composing, "")
+
+        let edit = HangulPreedit.wireEdit(sent: "각 깎 ", commit: s.commit)
+        XCTAssertEqual(edit.deletions, 1, "사라진 공백 하나만 지워야 한다")
+        XCTAssertEqual(edit.insertion, "")
+    }
+
+    /// Real deletions still reach the wire: the document no longer starts with
+    /// what was sent, so the pin does not apply.
+    func testSettleStillRetractsTextTheUserActuallyDeleted() {
+        let s = HangulPreedit.settle("각 ", alreadySent: "각 깎 ")
+        XCTAssertEqual(s.commit, "각 ")
+        XCTAssertEqual(s.composing, "")
+
+        let edit = HangulPreedit.wireEdit(sent: "각 깎 ", commit: s.commit)
+        XCTAssertEqual(edit.deletions, 2)
+    }
+
+    func testSettleNeverCommitsPastTheDocument() {
+        let s = HangulPreedit.settle("가", alreadySent: "가나다")
+        XCTAssertEqual(s.commit, "가")
+        XCTAssertEqual(s.composing, "")
+    }
+
     // MARK: wire diffing
 
     func testWireEditAppendsWhenTextGrows() {

@@ -2017,7 +2017,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             commit = HangulPreedit.composeDocument(textInputStorage)
             composing = ""
         } else {
-            (commit, composing) = HangulPreedit.split(textInputStorage)
+            (commit, composing) = HangulPreedit.settle(textInputStorage, alreadySent: wireSentText)
         }
 
         let edit = HangulPreedit.wireEdit(sent: wireSentText, commit: commit)

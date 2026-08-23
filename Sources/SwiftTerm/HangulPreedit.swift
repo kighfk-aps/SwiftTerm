@@ -67,6 +67,24 @@ enum HangulPreedit {
         return (commit, String(composing))
     }
 
+    /// Splits `storage`, but never lets text that already reached the terminal
+    /// slide back into composition.
+    ///
+    /// The plain `split` rule looks only at the document. When the IME deletes
+    /// a committed space together with the bare jamo after it — which is how
+    /// it starts a syllable following a space — the syllable in front would
+    /// briefly become volatile again, costing a DEL and a retype for text the
+    /// remote already had correct. Holding the commit point at whatever was
+    /// sent, for as long as the document still begins with it, keeps those
+    /// bytes where they are.
+    static func settle(_ storage: String, alreadySent: String) -> (commit: String, composing: String) {
+        let composed = composeDocument(storage)
+        let natural = split(storage).commit
+        let stillSent = zip(composed, alreadySent).prefix(while: { $0 == $1 }).count
+        let commitCount = max(natural.count, stillSent)
+        return (String(composed.prefix(commitCount)), String(composed.dropFirst(commitCount)))
+    }
+
     /// What the wire needs so that the text already written to the PTY becomes
     /// `commit`.
     struct WireEdit: Equatable {
