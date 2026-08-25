@@ -2574,9 +2574,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             let deletedChar = textInputStorage[deleteRange]
             let deletingAtEnd = rangeStartIndex == textInputStorage.textInputUTF16Count
             pendingAutoPeriodDeleteWasSpace = deletingAtEnd && deletedChar == " " && _markedTextRange == nil
+            // Read the caret offset while the index is still valid: a
+            // String.Index taken before removeSubrange does not survive it,
+            // and a caret left in the wrong place makes every range the IME
+            // repairs next land on the wrong characters.
+            let caretAfterDelete = textInputStorage.textInputUTF16Offset(of: deleteRange.lowerBound)
             textInputStorage.removeSubrange(deleteRange)
-            rangeStartPosition = TextPosition(
-                offset: textInputStorage.textInputUTF16Offset(of: deleteRange.lowerBound))
+            rangeStartPosition = TextPosition(offset: caretAfterDelete)
         } else {
             pendingAutoPeriodDeleteWasSpace = false
             beginTextInputEdit()
