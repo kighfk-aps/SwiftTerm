@@ -2291,6 +2291,9 @@ extension TerminalView {
         caretView.frame.size.width = cellDimension.width * doublePosition * CGFloat(cursorColumnWidth)
         caretView.setText (ch: charUnderCursor)
         #if os(iOS) || os(visionOS)
+        // Remember where the terminal put the caret before the composing
+        // overlay pushes it to the right of the syllable being typed.
+        preeditCaretAnchor = caretView.frame.origin
         // The composing overlay rides along with the caret.
         updatePreeditView()
         #endif

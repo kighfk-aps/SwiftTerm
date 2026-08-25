@@ -301,6 +301,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// Draws `composingText` over the terminal at the caret.
     var preeditView: UILabel?
 
+    /// Where the terminal itself put the caret, before the composing overlay
+    /// pushed it aside. `updateCursorPosition` is the only writer; every
+    /// preedit layout measures from here so repeated layouts do not stack
+    /// shift upon shift.
+    var preeditCaretAnchor: CGPoint?
+
     // This tracks the marked text, part of the UITextInput protocol, which is used to flag temporary data entry, that might
     // be removed afterwards by the input system (input methods will insert approximiations, mark and change on demand)
     var _markedTextRange: TextRange?
@@ -2086,6 +2092,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     func updatePreeditView() {
         guard !composingText.isEmpty else {
             preeditView?.removeFromSuperview()
+            // Nothing is being composed any more, so the caret goes back to
+            // the column the terminal itself picked.
+            if let anchor = preeditCaretAnchor {
+                caretView?.frame.origin.x = anchor.x
+            }
             return
         }
         let label: UILabel
@@ -2109,12 +2120,24 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if label.superview == nil {
             addSubview(label)
         }
-        let origin = caretView?.frame.origin ?? CGPoint.zero
+        let origin = preeditCaretAnchor ?? caretView?.frame.origin ?? CGPoint.zero
+        // Round the overlay out to whole cells: the caret has to land on the
+        // terminal's own grid, and that is where the composed syllable will
+        // sit once it is committed.
+        let cells = max(1, Int((label.frame.width / cellDimension.width).rounded(.up)))
+        let width = cellDimension.width * CGFloat(cells)
         label.frame = CGRect(x: origin.x,
                              y: origin.y,
-                             width: max(label.frame.width, cellDimension.width),
+                             width: width,
                              height: cellDimension.height)
         bringSubviewToFront(label)
+        // The caret follows the composing text instead of sitting under it, so
+        // it reads as "you are typing here, the next character goes after this
+        // one" — the same place the terminal's own cursor would be.
+        if let caretView {
+            let maxX = max(origin.x, bounds.width - caretView.frame.width)
+            caretView.frame.origin.x = min(origin.x + width, maxX)
+        }
     }
 
 
