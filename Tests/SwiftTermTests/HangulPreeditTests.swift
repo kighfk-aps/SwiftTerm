@@ -198,6 +198,13 @@ final class HangulPreeditTests: XCTestCase {
         XCTAssertEqual(HangulPreedit.backspace("안녕", alreadySent: "안녕"), "안")
     }
 
+    // MARK: backspace — 확정분 마지막 글자 삭제 회귀
+
+    func testBackspaceOnTheLastRemainingCommittedCharacterEmptiesTheDocument() {
+        XCTAssertEqual(HangulPreedit.backspace("안", alreadySent: "안"), "")
+        XCTAssertEqual(HangulPreedit.backspace("a", alreadySent: "a"), "")
+    }
+
     // MARK: backspace — 영문 회귀
 
     func testBackspace_영문_한_글자_지우기() {

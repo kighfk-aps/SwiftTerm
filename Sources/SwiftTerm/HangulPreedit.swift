@@ -154,6 +154,9 @@ enum HangulPreedit {
             // commit에서 마지막 글자를 뗀 길이(commit.count - 1)에 해당하는
             // 저장소 분할 지점을 composedLengths에서 찾아 그 앞까지 자른다
             let targetLength = commit.count - 1
+            if targetLength == 0 {
+                return ""
+            }
             let lengths = composedLengths(storage)
             var splitIndex = storage.count
             for i in 0..<lengths.count {
