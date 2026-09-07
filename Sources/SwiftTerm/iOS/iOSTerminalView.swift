@@ -2564,15 +2564,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
             let deletingAtEnd = rangeStartIndex == textInputStorage.textInputUTF16Count
             if deletingAtEnd, _markedTextRange == nil {
-                beginTextInputEdit()
-                let oldStorage = textInputStorage
-                pendingAutoPeriodDeleteWasSpace = oldStorage.last == " "
-                textInputStorage = HangulPreedit.backspace(oldStorage, alreadySent: wireSentText)
-                rangeStartPosition = TextPosition(offset: textInputStorage.textInputUTF16Count)
-                _markedTextRange = nil
-                _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
-                endTextInputEdit()
-                syncInputWire()
+                performTailAwareBackspace()
                 return
             }
 
@@ -2594,6 +2586,21 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             let caretAfterDelete = textInputStorage.textInputUTF16Offset(of: deleteRange.lowerBound)
             textInputStorage.removeSubrange(deleteRange)
             rangeStartPosition = TextPosition(offset: caretAfterDelete)
+        } else if _markedTextRange == nil,
+                  rangeToDelete.length == 1,
+                  rangeToDelete.endPosition.offset == textInputStorage.textInputUTF16Count {
+            // On-device trace (2026-09): a plain physical Backspace never
+            // arrives as a collapsed caret. iPadOS always pre-selects exactly
+            // the trailing storage character — [end-1, end) — before calling
+            // deleteBackward(), even for an ordinary single keypress. Route
+            // that the same way as the collapsed-caret case above, so a
+            // settled syllable is removed whole instead of losing one raw
+            // jamo per press. A wider OS-driven correction (e.g. reclaiming a
+            // trailing space together with a bare jamo, width 2+) is left to
+            // the literal removal below — that width is deliberate and must
+            // be respected as given.
+            performTailAwareBackspace()
+            return
         } else {
             pendingAutoPeriodDeleteWasSpace = false
             beginTextInputEdit()
@@ -2610,6 +2617,22 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         syncInputWire()
     }
 
+    /// Shrinks the document by one step from its end, using the settled/composing
+    /// boundary: a jamo at a time while still composing, a whole syllable once it
+    /// has reached the wire. See `HangulPreedit.backspace`. Called whenever the
+    /// deletion reaches the document end with no marked range — whether the OS
+    /// presented that as a collapsed caret or a width-1 trailing selection.
+    private func performTailAwareBackspace() {
+        beginTextInputEdit()
+        let oldStorage = textInputStorage
+        pendingAutoPeriodDeleteWasSpace = oldStorage.last == " "
+        textInputStorage = HangulPreedit.backspace(oldStorage, alreadySent: wireSentText)
+        let newPosition = TextPosition(offset: textInputStorage.textInputUTF16Count)
+        _markedTextRange = nil
+        _selectedTextRange = TextRange(from: newPosition, to: newPosition)
+        endTextInputEdit()
+        syncInputWire()
+    }
 
     enum SendData {
         case text(String)
