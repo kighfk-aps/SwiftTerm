@@ -205,9 +205,19 @@ final class HangulPreeditTests: XCTestCase {
         XCTAssertEqual(HangulPreedit.backspace("a", alreadySent: "a"), "")
     }
 
-    // MARK: backspace — 영문 회귀
+func testBackspaceOnSettledTextKeepsAllJamoThatFormTheRemovedSyllable() {
+    // "가ㄱ 까ㄲ 다ㄹㄱ 가ㅂㅅ " composes to "각 깎 닭 값 " (already fully sent).
+    // Removing the trailing space must leave "각 깎 닭 값" intact — the
+    // 값 syllable (built from 가+ㅂ+ㅅ) must not lose its batchim.
+    let storage = "가ㄱ 까ㄲ 다ㄹㄱ 가ㅂㅅ "
+    let sent = HangulPreedit.composeDocument(storage)
+    let after = HangulPreedit.backspace(storage, alreadySent: sent)
+    XCTAssertEqual(HangulPreedit.composeDocument(after), "각 깎 닭 값")
+}
 
-    func testBackspace_영문_한_글자_지우기() {
-        XCTAssertEqual(HangulPreedit.backspace("abc", alreadySent: "abc"), "ab")
-    }
+// MARK: backspace — 영문 회귀
+
+func testBackspace_영문_한_글자_지우기() {
+    XCTAssertEqual(HangulPreedit.backspace("abc", alreadySent: "abc"), "ab")
+}
 }

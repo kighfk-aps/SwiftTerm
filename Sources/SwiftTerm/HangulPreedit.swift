@@ -162,7 +162,6 @@ enum HangulPreedit {
             for i in 0..<lengths.count {
                 if lengths[i] == targetLength {
                     splitIndex = i + 1
-                    break
                 }
             }
             return String(storage.prefix(splitIndex))
