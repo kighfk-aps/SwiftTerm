@@ -2562,6 +2562,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 return
             }
 
+            let deletingAtEnd = rangeStartIndex == textInputStorage.textInputUTF16Count
+            if deletingAtEnd, _markedTextRange == nil {
+                beginTextInputEdit()
+                let oldStorage = textInputStorage
+                pendingAutoPeriodDeleteWasSpace = oldStorage.last == " "
+                textInputStorage = HangulPreedit.backspace(oldStorage, alreadySent: wireSentText)
+                rangeStartPosition = TextPosition(offset: textInputStorage.textInputUTF16Count)
+                _markedTextRange = nil
+                _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
+                endTextInputEdit()
+                syncInputWire()
+                return
+            }
+
             beginTextInputEdit()
 
             guard let deleteRange = textInputStorage.textInputCharacterRange(beforeUTF16Offset: rangeStartIndex) else {
@@ -2572,7 +2586,6 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 return
             }
             let deletedChar = textInputStorage[deleteRange]
-            let deletingAtEnd = rangeStartIndex == textInputStorage.textInputUTF16Count
             pendingAutoPeriodDeleteWasSpace = deletingAtEnd && deletedChar == " " && _markedTextRange == nil
             // Read the caret offset while the index is still valid: a
             // String.Index taken before removeSubrange does not survive it,

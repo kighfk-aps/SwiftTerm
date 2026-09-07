@@ -150,4 +150,57 @@ final class HangulPreeditTests: XCTestCase {
         XCTAssertEqual(edit.deletions, 2)
         XCTAssertEqual(edit.insertion, "라")
     }
+
+    // MARK: removeLastJamo
+
+    func testRemoveLastJamo_겹받침이_있는_음절_종성_하나만_제거() {
+        XCTAssertEqual(HangulComposition.removeLastJamo("닭"), "달")
+    }
+
+    func testRemoveLastJamo_홑받침_제거() {
+        XCTAssertEqual(HangulComposition.removeLastJamo("각"), "가")
+    }
+
+    func testRemoveLastJamo_복모음_첫_모음만_남기기() {
+        XCTAssertEqual(HangulComposition.removeLastJamo("와"), "오")
+    }
+
+    func testRemoveLastJamo_단모음_초성_반환() {
+        XCTAssertEqual(HangulComposition.removeLastJamo("가"), "ㄱ")
+    }
+
+    func testRemoveLastJamo_자음_낱자_삭제() {
+        XCTAssertEqual(HangulComposition.removeLastJamo("ㄱ"), "")
+    }
+
+    func testRemoveLastJamo_모음_낱자_삭제() {
+        XCTAssertEqual(HangulComposition.removeLastJamo("ㅏ"), "")
+    }
+
+    func testRemoveLastJamo_한글아니면_nil_반환() {
+        XCTAssertEqual(HangulComposition.removeLastJamo("a"), nil)
+    }
+
+    // MARK: backspace — 조합 중(아직 아무것도 안 보낸 경우, alreadySent: "")
+
+    func testBackspace_조합중_자모_단위() {
+        XCTAssertEqual(HangulPreedit.backspace("가ㄱ", alreadySent: ""), "가")
+        XCTAssertEqual(HangulPreedit.backspace("가", alreadySent: ""), "ㄱ")
+        XCTAssertEqual(HangulPreedit.backspace("ㄱ", alreadySent: ""), "")
+        XCTAssertEqual(HangulPreedit.backspace("다ㄹㄱ", alreadySent: ""), "다ㄹ")
+        XCTAssertEqual(HangulPreedit.backspace("와", alreadySent: ""), "오")
+    }
+
+    // MARK: backspace — 확정분(이미 전송된 경우)
+
+    func testBackspace_확정분_통글자_지우기() {
+        XCTAssertEqual(HangulPreedit.backspace("각 깎", alreadySent: "각 깎"), "각 ")
+        XCTAssertEqual(HangulPreedit.backspace("안녕", alreadySent: "안녕"), "안")
+    }
+
+    // MARK: backspace — 영문 회귀
+
+    func testBackspace_영문_한_글자_지우기() {
+        XCTAssertEqual(HangulPreedit.backspace("abc", alreadySent: "abc"), "ab")
+    }
 }

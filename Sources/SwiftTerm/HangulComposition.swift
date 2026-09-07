@@ -84,6 +84,42 @@ enum HangulComposition {
         decompose(character) != nil || isVowelJamo(character) || isConsonantJamo(character)
     }
 
+    /// Removes the last jamo from a character, returning the remaining string.
+    /// - Returns: The character with its last jamo removed, or `nil` if the input
+    ///   is a non-Hangul character or a single character that cannot be decomposed.
+    static func removeLastJamo(_ character: Character) -> String? {
+        // Single character that is already a single jamo (consonant or vowel) → delete it all
+        if isVowelJamo(character) || isConsonantJamo(character) {
+            return ""
+        }
+
+        guard let syllable = decompose(character) else {
+            // Not Hangul at all
+            return nil
+        }
+
+        // Has a final consonant (겹받침 or 홑받침)
+        if syllable.final != 0 {
+            // 겹받침인 경우: splitFinal로 쪼개 첫 요소만 남김
+            if let finalChar = jongseongOrder[syllable.final],
+               let (keep, _) = splitFinal(finalChar) {
+                let keepIndex = jongseongOrder.firstIndex(of: keep)!
+                return String(compose(initial: syllable.initial, medial: syllable.medial, final: keepIndex))
+            }
+            // Fallback: just remove the final
+            return String(compose(initial: syllable.initial, medial: syllable.medial, final: 0))
+        }
+
+        // No final consonant
+        let medialChar = jungseongOrder[syllable.medial]
+        if let (keep, _) = splitMedial(medialChar) {
+            let keepIndex = jungseongOrder.firstIndex(of: keep)!
+            return String(compose(initial: syllable.initial, medial: keepIndex, final: 0))
+        }
+        let initialChar = choseongOrder[syllable.initial]
+        return String(initialChar)
+    }
+
     /// Attaches `jamos` onto `base` one at a time (받침, then 겹받침). Returns
     /// the full replacement string for the base+jamos span; jamo that cannot
     /// attach stay verbatim at the end (다+ㄹㅋ → 달ㅋ).

@@ -3,24 +3,17 @@
 //  SwiftTerm
 //
 //  Splits the IME document into what the PTY may safely receive and what is
-//  still being composed.
+//  still composed and therefore belongs on screen only.
 //
-
-import Foundation
-
-/// Turns the IME's document into the two things a terminal needs: the text that
-/// is final enough to write to the PTY, and the tail that is still being
-/// composed and therefore belongs on screen only.
-///
-/// The rules come from on-device iPadOS traces (2026-08-23). A Korean hardware
-/// keyboard delivers the leading jamo of a syllable as a bare `insertText`,
-/// repairs 초성+중성 itself with select/delete/insert spans, and never attaches
-/// 받침 at all — bare trailing consonants just sit in the document.
-///
-/// Earlier revisions of this fork rewrote the document to attach those 받침.
-/// That desynced the IME's own model and corrupted the very next span it
-/// selected. Nothing here mutates the document: these are pure functions over a
-/// snapshot of it.
+// The rules come from on-device iPadOS traces (2026-08-23). A Korean hardware
+// keyboard delivers the leading jamo of a syllable as a bare `insertText`,
+// repairs 초성+중성 itself with select/delete/insert spans, and never attaches
+// 받침 at all — bare trailing consonants just sit in the document.
+//
+// Earlier revisions of this fork rewrote the document to attach those 받침.
+// That desynced the IME's own model and corrupted the very next span it
+// selected. Nothing here mutates the document: these are pure functions over a
+// snapshot of it.
 enum HangulPreedit {
 
     /// The document as a reader should see it: bare trailing consonants merged
@@ -43,6 +36,30 @@ enum HangulPreedit {
             }
         }
         return out
+    }
+
+    /// Records, for each storage character, the resulting character count after
+    /// composing all characters up to (and including) that one via `composeDocument`.
+    /// Useful for mapping between storage indices and composed lengths during
+    /// backspace operations.
+    /// - Parameter storage: The full IME document string.
+    /// - Returns: An array where `lengths[i]` is the composed character count of
+    ///   `storage[..<storage.index(after: i)]` after passing through `composeDocument`.
+    static func composedLengths(_ storage: String) -> [Int] {
+        var lengths: [Int] = []
+        var composed = ""
+        for character in storage {
+            if HangulComposition.isHangulInput(character),
+               let base = composed.last,
+               let merged = HangulComposition.replacement(for: base, incoming: character) {
+                composed.removeLast()
+                composed += merged
+            } else {
+                composed.append(character)
+            }
+            lengths.append(composed.unicodeScalars.count)
+        }
+        return lengths
     }
 
     /// Splits the composed document at the last point that can still change.
@@ -83,6 +100,70 @@ enum HangulPreedit {
         let stillSent = zip(composed, alreadySent).prefix(while: { $0 == $1 }).count
         let commitCount = max(natural.count, stillSent)
         return (String(composed.prefix(commitCount)), String(composed.dropFirst(commitCount)))
+    }
+
+    /// Calculates the new storage string after a backspace operation.
+    /// - Parameters:
+    ///   - storage: The current IME document string.
+    ///   - alreadySent: The text that has already been sent to the PTY.
+    /// - Returns: The new storage string with the appropriate character(s) removed.
+    static func backspace(_ storage: String, alreadySent: String) -> String {
+        let (commit, composing) = settle(storage, alreadySent: alreadySent)
+
+        // composing이 비어 있지 않다면: 조합 중 — 자모 단위로 지운다
+        if !composing.isEmpty {
+            // commit.count에 해당하는 저장소 분할 지점 k를 찾는다
+            let lengths = composedLengths(storage)
+            var k = storage.count  // 기본값: 전체가 여전히 조합 중
+            if !commit.isEmpty {
+                for i in 0..<lengths.count {
+                    if lengths[i] >= commit.count {
+                        k = i + 1
+                        break
+                    }
+                }
+            } else {
+                k = 0
+            }
+            let tailStartIndex = storage.index(storage.startIndex, offsetBy: k)
+            let tail = String(storage[tailStartIndex...])
+
+            if tail.count >= 2 {
+                // tail에서 마지막 문자 하나를 뗀 것
+                let prefix = String(storage.prefix(k))
+                return prefix + String(tail.dropLast())
+            } else if tail.count == 1 {
+                // HangulComposition.removeLastJamo(tail의 그 한 글자)가 non-nil 결과 r을 주면
+                if let r = HangulComposition.removeLastJamo(tail.first!) {
+                    let prefix = String(storage.prefix(k))
+                    return prefix + r
+                }
+                // nil이면 (조합 불가능한 단일 문자, 이론상 발생 안 하지만 방어적으로)
+                let prefix = String(storage.prefix(k))
+                return prefix
+            } else {
+                // tail이 비어있으면 commit 그대로
+                return String(commit)
+            }
+        }
+
+        // composing이 비어 있다면: 확정분 — 글자 단위로 지운다
+        if commit.isEmpty {
+            return ""
+        } else {
+            // commit에서 마지막 글자를 뗀 길이(commit.count - 1)에 해당하는
+            // 저장소 분할 지점을 composedLengths에서 찾아 그 앞까지 자른다
+            let targetLength = commit.count - 1
+            let lengths = composedLengths(storage)
+            var splitIndex = storage.count
+            for i in 0..<lengths.count {
+                if lengths[i] == targetLength {
+                    splitIndex = i + 1
+                    break
+                }
+            }
+            return String(storage.prefix(splitIndex))
+        }
     }
 
     /// What the wire needs so that the text already written to the PTY becomes
